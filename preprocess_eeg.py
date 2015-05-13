@@ -8,47 +8,12 @@ Copyright (c) 2015 DvM. All rights reserved.
 import mne
 import os
 import numpy as np
+import scipy as sp
 import logging
 import matplotlib.pyplot as plt
+import math
+import seaborn as sns
 from IPython import embed as shell
-
-
-data_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data') 
-file_name = data_folder + '/load_accessory/eeg/subject1_session_1.bdf'
-
-# step 1
-event_1 = [100,109,200,209,110,119,210,219]
-event_2 = [101,102,103,104,105,106,107,108,111,112,113,114,115,116,117,118,201,202,203,204,205,206,207,208,211,212,213,214,215,216,217,218]
-
-RO = RawBDF(file_name)
-RO.dropEmptyChannels()
-RO.renameChannel()
-RO.reReference()
-RO.filter(l_freq = 0.5, h_freq = None, h_trans_bandwidth = 0.1)
-RO.changeEventCodes(event_1, event_2)
-
-#step 2
-event_id_mem = {'1_match_left_single' :100,
-				'1_match_right_single': 109,
-				'1_neutral_left_single': 110,
-				'1_neutral_right_single': 119,
-				'2_match_left_single': 200,
-				'2_match_right_single': 209,
-				'2_neutral_left_single': 210,
-				'2_neutral_right_single': 219,
-				'1_match_left_dual': 1100,
-				'1_match_right_dual': 1109,
-				'1_neutral_left_dual': 1110,
-				'1_neutral_right_dual': 1119,
-				'2_match_left_dual': 1200,
-				'2_match_right_dual': 1209,
-				'2_neutral_left_dual': 1210,
-				'2_neutral_right_dual': 1219,		
-				}
-tmin = 0.8
-tmax = 1.9
-baseline = (0.8,1.0)				
-EO = RawEpochs(RO, RO.event_list, event_id_mem, tmin, tmax, baseline)
 
 
 class RawBDF(mne.io.edf.edf.RawEDF):
@@ -161,6 +126,102 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 
 		self.event_list = events		
 
+class RejectEpochs(mne.Epochs):
+	'''
+	Child originating from MNE built-in Epochs, such that new methods can be added to this built in class
+	'''
+
+	def __init__(self, raw_object, events, event_id, tmin, tmax, baseline = (None,0), picks = None, preload = True, \
+		decim = 1, on_missing = 'error', verbose = None, filter_padding = 0.2):
+		self.epoch_len = tmax - tmin
+		super(RejectEpochs,self).__init__(raw_object, events, event_id, tmin = tmin - filter_padding, tmax = tmax + filter_padding, baseline = baseline,\
+			picks = picks, preload = preload, decim = decim, on_missing = on_missing, verbose = verbose)
+		#logging.info
+
+	def artifactDetection(self, z_threshold = 13, sampl_freq = 512, nr_electrodes = 64, band_pass = [110,140]):
+		'''
+		Detect artifacts based on FieldTrip's automatic artifact detection. Artifacts are detected in three steps:
+			1. Filtering the data
+			2. Z-transforming the filtered data and averaging it over channels
+			3. Threshold the accumulated z-score
+		'''
+
+		# select data and apply basline correction per epoch
+		all_data = np.hstack([self[epoch].get_data()[0,:nr_electrodes,:] for epoch in range(len(self))])
+		len_epoch = all_data.shape[1]/len(self)
+		all_data_base = np.array(np.hstack([np.matrix(all_data[:,i*len_epoch:i*len_epoch + len_epoch]) - np.matrix(all_data[:,i*len_epoch:i*len_epoch + len_epoch]).mean(axis=1) for i in range(len(self))]))
+
+		# step 1 filter data 
+		all_data_filt = self.filterEpoch(all_data_base, sampl_freq)
+		
+		# correct for filter padding
+		len_padded = all_data.shape[1]/len(self)
+		len_epoch = int(np.ceil(self.epoch_len*sampl_freq))
+
+		index_epoch = np.zeros(len_padded, dtype = bool)
+		index_epoch[(len_padded - len_epoch)/2 : (len_padded - len_epoch)/2 + len_epoch] = True
+		index_epoch_tiled = np.tile(index_epoch, len(self))
+		all_data_filt = all_data_filt[:,index_epoch_tiled]
+
+		# step 2 z transform filtered data
+		all_data_amp = np.abs(sp.signal.hilbert(all_data_filt))
+		all_data_z = (all_data_amp - all_data_amp.mean())/all_data_amp.std()
+		z_summed = all_data_z.sum(axis = 0)/math.sqrt(nr_electrodes)
+
+		# step 3 threshold z-score per epoch
+		for epoch in range(len(self)):	
+			# select channel that contributes most to thresholded z value
+			z_index = np.zeros(z_summed.size, dtype = bool)
+			z_index[epoch*len_epoch:epoch*len_epoch + len_epoch] = True
+			z_data = all_data_z[:,z_index]
+			index_ch = np.where(z_data == z_data.max())[0][0]
+
+			if z_summed[z_index].max() >= z_threshold:
+				data_2_plot = self[epoch].get_data()[0,:nr_electrodes,:][index_ch,index_epoch]
+				data_2_plot = data_2_plot - data_2_plot.mean()
+				z_2_plot = z_summed[z_index]
+
+				f=plt.figure(figsize = (25,10))
+				
+
+				with sns.axes_style('dark'):
+
+					ax = f.add_subplot(1,2,1)
+					plt.plot(np.arange(0,z_summed.size),z_summed,color = 'b')
+					plt.plot([0,z_summed.size],[z_threshold,z_threshold], 'r--')
+					plt.fill_between(np.arange(epoch*len_epoch,epoch*len_epoch + len_epoch-1),-50,150, color = 'purple', alpha = 0.5)
+					plt.ylabel('zscore')
+					plt.xlabel('samples')
+					plt.xlim(0,z_summed.size)
+					plt.ylim(-50,200)
+
+					ax = f.add_subplot(2,2,2)	
+					plt.plot(np.arange(0,data_2_plot.size),data_2_plot,color = 'b')	
+					plt.title('Epoch' + str(epoch) + ', channel ' + self.ch_names[index_ch])
+					plt.ylabel('EEG signal (V)')
+					plt.xlabel('samples')
+					plt.xlim(0,data_2_plot.size)
+			
+					ax = f.add_subplot(2,2,4)	
+					plt.plot(np.arange(0,z_2_plot.size),z_2_plot,color = 'b')
+					plt.plot([0,z_2_plot.size],[z_threshold,z_threshold], 'r--')
+					plt.ylabel('zscore')
+					plt.xlabel('samples')	
+					plt.xlim(0,z_2_plot.size)
+					#sns.despine(offset=5)
+					#plt.ylim(-50,200)	
+
+				plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','figs','marked_epoch' + str(epoch) + '.pdf'))
+				plt.close()	
+
+	def filterEpoch(self,signal, sampl_freq = 512, low_pass = 110, high_pass = 140):
+		'''
+		doc string filterEpoch
+		'''
+
+		b, a = sp.signal.butter(3,[low_pass/2.0/sampl_freq, high_pass/2.0/sampl_freq], btype = 'band')
+		return sp.signal.filtfilt(b,a,signal)
+
 
 class RawEpochs(mne.Epochs):
 	'''
@@ -174,65 +235,194 @@ class RawEpochs(mne.Epochs):
 			picks = picks, preload = preload, decim = decim, on_missing = on_missing, verbose = verbose)
 		#logging.info
 
-	def markHighFreqEpochs(self, sampl_freq = 1.95, window = 100, step = 50, threshold = 100e-5):
+	def markHighFreqEpochs(self, sampl_freq = 512, window = 100, step = 50, threshold = 120e-6, channels = 5):
 		'''
 		Flag all epochs that contain high frequency noise as defined by different parameters
 		'''
 
 		# loop over all epochs
 		bad_epochs = []
+		all_data = np.hstack([EO[epoch].get_data()[0] for epoch in range(len(EO))])
+		
+		all_peaks = [np.array(detectPeaks(all_data[ch], valley = False)) for ch in range(64)]
+		all_valleys = [np.array(detectPeaks(all_data[ch], valley = True)) for ch in range(64)]
+
+		for i in range(64):
+			if len(all_peaks[i]) < len(all_valleys[i]):
+				all_valleys[i] = all_valleys[i][:len(all_peaks[i])]
+			elif len(all_valleys[i]) < len(all_peaks[i]):
+				all_peaks[i] = all_peaks[i][:len(all_valleys[i])]
+
+		mean_amp = [np.mean(all_data[i][all_peaks[i]] - all_data[i][all_valleys[i]]) for i in range(len(all_peaks))]		
+		std_amp = [np.std(all_data[i][all_peaks[i]] - all_data[i][all_valleys[i]]) for i in range(len(all_peaks))]
 
 		for epoch in range(len(EO)):	
 			
-			data = EO[epoch].get_data()
+			data = EO[epoch].get_data()[0]
 			
 			# create sliding window
-			sl_window = [(i,i + window) for i in range(0,data.shape[2] - window, step)]
-			if sl_window[-1][-1] < data.shape[2] - 1:
-				sl_window.append((sl_window[-1][0] + 50, data.shape[2] - 1))
+			sl_window = [(i,i + window) for i in range(0,data.shape[1] - window, step)]
+			if sl_window[-1][-1] < data.shape[1] - 1:
+				sl_window.append((sl_window[-1][0] + 50, data.shape[1] - 1))
 
-			for start, stop in sl_window:
+			peak_info = []
+			ps_info = []
+			mark_epoch = False	
+			for i, (start, stop) in enumerate(sl_window):
+				
+				# for each time window calculate peak to peak amplitude and power spectrum
+				peak2peak = [data[ch,start:stop].max() - data[ch,start:stop].min() for ch in range(64)] # peak to peak amplitude per electrode
+				for j in range(len(mean_amp)):
+					if peak2peak[j] > mean_amp[j] + 20*std_amp[j]:
+						mark_epoch = True
 
-				peak2peak = [abs(data[0,ch,start:stop].min()) + abs(data[0,ch,start:stop].max()) for ch in range(64)] # peak to peak amplitude per electrode
+				peak2peak_sorted = np.array(sorted((f,e) for e, f in enumerate(peak2peak)))
+				
+				ps = [(np.abs(np.fft.fft(data[ch,start:stop]))**2)[:int(window/2)] for ch in range(64)] # power spectrum per electrode
 
-				if max(peak2peak) > threshold:
-					bad_epochs.append(epoch)
+				peak_info.append(peak2peak_sorted)
+				ps_info.append(ps)
+
+			if mark_epoch:
+				bad_epochs.append(epoch)
+
+				windows2plot = np.array([peak_info[i][:,0].max() for i in range(len(peak_info))]).argsort()[-2:]	
+				channels2plot = np.array(peak_info[windows2plot[-1]],dtype = int)[-4:,1]
+
+				freqs_w = np.fft.fftfreq(window, 1.0/sampl_freq)[:int(window/2)]
+				freqs_e = np.fft.fftfreq(data[0].size, 1.0/sampl_freq)[:int(data[0].size/2)]
+			
+				plot_index_epoch = [1,3,9,11]
+				plot_index_window = [(3,4),(7,8),(19,20),(23,24)]
+
+				f=plt.figure(figsize = (20,20))
+
+				for ch_index in range(len(channels2plot)):
+					
+					# plot epoch
+					data2plot = data[channels2plot[ch_index]]
+					ax = f.add_subplot(4,4,plot_index_epoch[ch_index])
+					plt.plot(np.arange(0,data2plot.size),data2plot,color = 'g')
+					# show mean amplitude in plot
+					plt.plot(np.arange(0,data2plot.size),[mean_amp[channels2plot[ch_index]] + 10*std_amp[channels2plot[ch_index]]]*data2plot.size,color ='black')
+					plt.plot(np.arange(0,data2plot.size),[-mean_amp[channels2plot[ch_index]] - 10*std_amp[channels2plot[ch_index]]]*data2plot.size,color ='black')
+					plt.fill_between(np.arange(0,data2plot.size),-mean_amp[channels2plot[ch_index]],mean_amp[channels2plot[ch_index]],alpha = 0.7, color = 'g')
+
+					plt.title('Channel ' + EO.ch_names[ch_index])
+					plt.xlim(0,data2plot.size)
+					if ch_index in [0,2]:
+						plt.ylabel('EEG signal')
+					else:
+						plt.yticks([])
+					plt.ylim(-threshold/2,threshold/2)
+
+					# plot power spectrum
+					ax = f.add_subplot(4,4,plot_index_epoch[ch_index] + 4)
+					ps2plot = (np.abs(np.fft.fft(data[ch,:]))**2)[:int(data[0].size/2)]
+					plt.plot(freqs_e, ps2plot,color = 'r')
+					if ch_index in [0,2]:
+						plt.ylabel('Power Spectrum')
+					else:
+						plt.yticks([])
+
+					# plot window of epoch
+					for win_ind, win in enumerate(windows2plot[::-1]):
+						
+						data2plot = data[channels2plot[ch_index],sl_window[win][0]:sl_window[win][1]]
+						ax = f.add_subplot(4,8,plot_index_window[ch_index][win_ind])
+						plt.plot(np.arange(sl_window[win][0],sl_window[win][1]),data2plot,color = 'b')
+						plt.fill_between(np.arange(sl_window[win][0],sl_window[win][1]),-mean_amp[channels2plot[ch_index]],mean_amp[channels2plot[ch_index]],alpha = 0.7, color = 'b')
+
+						plt.yticks([])
+						plt.xlim(sl_window[win][0],sl_window[win][1])
+						plt.ylim(-threshold/2,threshold/2)
+					# plot window of power spectrum		
+						ps2plot = ps_info[win_ind][ch_index]
+						ax = f.add_subplot(4,8,plot_index_window[ch_index][win_ind] + 8)
+						plt.plot(freqs_w, ps2plot,color = 'y')
+						plt.yticks([])
+						
+				plt.savefig(data_folder + os.path.join('/load_accessory/eeg/marked_epoch' + str(epoch) + '.pdf'))
+				plt.close()		
+
+			for peak in peak_info:
+				if peak[-1][0] > threshold:
+
+					# plot data channels with highest amplitudes
+					f=plt.figure(figsize = (40,40))
+
+					for plots in range(len(peak_info)):
+						for ch in range(channels):
+							# plot signal for separate time bins
+							ind_channel = peak_info[plots][-ch-1][1]
+							data2plot = data[ind_channel,sl_window[plots][0]:sl_window[plots][1]]
+							
+
+							ax = f.add_subplot(len(peak_info),channels,ch + 1 + plots*channels)
+							plt.plot(np.arange(sl_window[plots][0],sl_window[plots][1]),data2plot,color = 'g')
+							plt.title('Channel ' + EO.ch_names[ind_channel])
+							
+							#plt.xlabel('time (ms)')
+							if ch == 0:
+								plt.ylabel('EEG signal')
+							else:
+								plt.yticks([])	
+							plt.ylim(-150e-6,150e-6)
+							plt.xlim(sl_window[plots][0],sl_window[plots][1])
+							#plt.xlim(sl_window[plots][0],sl_window[plots][1])
+							#
+							#plt.text(x = 0.37, y = 0.95, s = 'p2p = ' + str(round(peak2peak_sorted[-ch-1][0],5)),verticalalignment='center',fontsize=20, transform = ax.transAxes, bbox = {'alpha' :0.3, 'facecolor': 'grey' })
+							#plt.axis('off')
+
+							# plot frequency plots for all time bins
+							#ax = f.add_subplot(len(peak_info) + 1,channels*2,plot)
+							#plt.plot(freqs, ps_info[plots][peak_info[plots][-ch-1][1]],color = 'r')
+							
+							#plt.fill_between(freqs[np.where(freqs>50)],0,np.max(ps_info[plots][peak_info[plots][-ch-1][1]]),alpha = 0.2, color = 'grey')
+							#plt.xlabel('freq (Hz)')
+							#if ch == 0:
+							#	plt.ylabel('Power Spectrum')
+							#else:
+							#	plt.yticks([])
+							#plt.ylim(0,np.max(ps[peak2peak_sorted[-ch-1][1]]))
+							#plt.xlim(freqs[0],freqs[-1])	
+								
+					plt.savefig(data_folder + os.path.join('/load_accessory/eeg/fig' + str(epoch) + 'win_' + str(i) + '.pdf'))
+					plt.close()				
+					break
+						
+			
+			return unique(bad_epochs)			
 			
 
-
-
-
-
-
-    
 	def detectPeaks(signal, mph = None, mpd = 1, threshold = 0, edge = 'rising', kpsh = False, valley = False, show = False, ax = None):
-    	'''
-    	Detect peaks in data based on their amplitude and other features.
-    	Function copied from 'Marcos Duarte, https://github.com/demotu/BMC'
+		'''
+		Detect peaks in data based on their amplitude and other features.
+		Function copied from 'Marcos Duarte, https://github.com/demotu/BMC'
 
-    	Arguments
-    	- - - - - 
-    	signal (np.array): 1D_array data
-    	mph (int): detect peaks that are greater 
-    	mpd (int): optional (default = 1), detect peaks that are at least separated by minimum peak distance (in
-        number of data).
-    	threshold (int): optional (default = 0), detect peaks (valleys) that are greater (smaller) than `threshold`
-        in relation to their immediate neighbors.
-    	edge (string): {None, 'rising', 'falling', 'both'}, optional (default = 'rising')
-        for a flat peak, keep only the rising edge ('rising'), only the falling edge ('falling'), both edges ('both'), or don't detect a
-        flat peak (None).
-    	kpsh (boolean): optional (default = False), keep peaks with same height even if they are closer than `mpd`.
-    	valley (bool): optional (default = False), if True (1), detect valleys (local minima) instead of peaks.
-    	
-    	show : bool, optional (default = False)
-        if True (1), plot data in matplotlib figure.
-   		 ax : a matplotlib.axes.Axes instance, optional (default = None).
+		Arguments
+		- - - - - 
+		signal (np.array): 1D_array data
+		mph (int): detect peaks that are greater 
+		mpd (int): optional (default = 1), detect peaks that are at least separated by minimum peak distance (in
+		number of data).
+		threshold (int): optional (default = 0), detect peaks (valleys) that are greater (smaller) than `threshold`
+		in relation to their immediate neighbors.
+		edge (string): {None, 'rising', 'falling', 'both'}, optional (default = 'rising')
+		for a flat peak, keep only the rising edge ('rising'), only the falling edge ('falling'), both edges ('both'), or don't detect a
+		flat peak (None).
+		kpsh (boolean): optional (default = False), keep peaks with same height even if they are closer than `mpd`.
+		valley (bool): optional (default = False), if True (1), detect valleys (local minima) instead of peaks.
 
-    	Returns
-    	- - - -
+		show : bool, optional (default = False)
+		if True (1), plot data in matplotlib figure.
+			 ax : a matplotlib.axes.Axes instance, optional (default = None).
 
-    	index (np.array): 1D_array indices of the peaks (valleys)
-    	'''   
+		Returns
+		- - - -
+
+		index (np.array): 1D_array indices of the peaks (valleys)
+		'''   
 	
 		signal = np.atleast_1d(signal).astype('float64')
 		if signal.size < 3:
@@ -289,13 +479,13 @@ class RawEpochs(mne.Epochs):
 				signal[indnan] = np.nan
 			if valley:
 				signal = -signal
-			_plot(signal, mph, mpd, threshold, edge, valley, ax, ind)
+			_plot(signal, ind,mph, mpd, threshold, edge, valley, ax)
 
 		return ind 
 
 
 
-	def _plot(x, mph, mpd, threshold, edge, valley, ax, ind):
+	def _plot(x, ind, mph = None, mpd = 1, threshold = 0, edge =' rising', valley = False, ax = None):
 		"""Plot results of the detect_peaks function, see its help."""
 		
 		try:
@@ -306,7 +496,7 @@ class RawEpochs(mne.Epochs):
 			if ax is None:
 				_, ax = plt.subplots(1, 1, figsize=(8, 4))
 
-			ax.plot(x, 'b', lw=1)
+			plt.plot(x, 'b', lw=1)
 			if ind.size:
 				label = 'valley' if valley else 'peak'
 				label = label + 's' if ind.size > 1 else label
@@ -324,10 +514,7 @@ class RawEpochs(mne.Epochs):
 			# plt.grid()
 			plt.show()
 
-
-
-
-    def CorrectArtifactICA(raw, n_components = 50, picks = None, EOG = ['VEOG1','VEOG2','HEOG3','HEOG4'], max_comp = 1):
+	def CorrectArtifactICA(raw, n_components = 50, picks = None, EOG = ['VEOG1','VEOG2','HEOG3','HEOG4'], max_comp = 1):
 		'''
 		docstring
 		'''
@@ -352,11 +539,7 @@ class RawEpochs(mne.Epochs):
 
 
 
-## step 1: read in raw data and change channel names
-data_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data') 
-file_name = data_folder + '/load_accessory/eeg/subject1_session_1.bdf'
 
-raw_eeg = mne.io.read_raw_edf(input_fname = file_name, preload = True)
 
 
 
@@ -365,93 +548,8 @@ raw_eeg = mne.io.read_raw_edf(input_fname = file_name, preload = True)
 
 
 # and define events
-events = mne.find_events(raw_eeg, stim_channel = 'STI 014')
-mem_events = [100,109,200,209,110,119,210,219]
-search_events = [101,102,103,104,105,106,107,108,111,112,113,114,115,116,117,118,201,202,203,204,205,206,207,208,211,212,213,214,215,216,217,218]
+#events = mne.find_events(raw_eeg, stim_channel = 'STI 014')
 
-for event_id, event in enumerate(events[:,2]):
-	if (event in mem_events) and events[event_id + 1, 2] in search_events:
-		events[event_id,2] += 1000
-
-# step 2: rereference to linked mastoids
-#raw_eeg = setEEGReference(raw = raw_eeg)
-#raw_eeg, _ = mne.io.set_eeg_reference(raw_eeg, ['EXG5','EXG6'], copy=False)
-
-# and rereference EOG data
-#raw_eeg = setEOGReference(raw = raw_eeg)
-
-# step 4: filter data
-#raw_eeg.filter(l_freq = 0.5, h_freq = None, h_trans_bandwidth = 0.1) # now only EEG channels are filtered (needs to be checked)
-
-# step 5: split data into different epochs and apply baseline correction
-
-
-# specify events
-event_id_mem = {'1_match_left_single' :100,
-				'1_match_right_single': 109,
-				'1_neutral_left_single': 110,
-				'1_neutral_right_single': 119,
-				'2_match_left_single': 200,
-				'2_match_right_single': 209,
-				'2_neutral_left_single': 210,
-				'2_neutral_right_single': 219,
-				'1_match_left_dual': 1100,
-				'1_match_right_dual': 1109,
-				'1_neutral_left_dual': 1110,
-				'1_neutral_right_dual': 1119,
-				'2_match_left_dual': 1200,
-				'2_match_right_dual': 1209,
-				'2_neutral_left_dual': 1210,
-				'2_neutral_right_dual': 1219,		
-				}
-
-event_id_search =  {'1_match_up_left': 101,
-					'1_match_up_right': 102,
-					'1_match_down_left': 103,
-					'1_match_down_right': 104,
-					'1_match_left_up': 105,
-					'1_match_left_down': 106,
-					'1_match_right_up': 107,
-					'1_match_right_down': 108,
-					'1_neutral_up_left': 111,
-					'1_neutral_up_right': 112,
-					'1_neutral_down_left': 113,
-					'1_neutral_down_right': 114,
-					'1_neutral_left_up': 115,
-					'1_neutral_left_down': 116,
-					'1_neutral_right_up': 117,
-					'1_neutral_right_down': 118,
-					'2_match_up_left': 201,
-					'2_match_up_right': 202,
-					'2_match_down_left': 203,
-					'2_match_down_right': 204,
-					'2_match_left_up': 205,
-					'2_match_left_down': 206,
-					'2_match_right_up': 207,
-					'2_match_right_down': 208,
-					'2_neutral_up_left': 211,
-					'2_neutral_up_right': 212,
-					'2_neutral_down_left': 213,
-					'2_neutral_down_right': 214,
-					'2_neutral_left_up': 215,
-					'2_neutral_left_down': 216,
-					'2_neutral_right_up': 217,
-					'2_neutral_right_down': 218,
-					}
-
-
-reject = dict(eeg=100e-5)
-epochs = mne.Epochs(raw = raw_eeg, events = events, event_id = event_id_mem, tmin = 0.8, tmax = 1.9, baseline = (0.8,1.0), preload = True)#reject = reject, reject_tmin = 0.8, reject_tmax = 1.9, preload = True) # picks should be integers
-
-# step 5: 
-#ICA for artifact correction
-epochs = CorrectArtifactICA(epochs)
-#raw_eeg = CorrectArtifactICA(raw_eeg)
-
-
-#ica = mne.preprocessing.ICA(n_components = 50)
-#ica.fit(raw_eeg, picks = picks_eeg, decim = 3)
-#ica_eeg = ica.apply(raw_eeg)
 
 def renameChannel(raw,channels, new_names):
 	'''
