@@ -13,6 +13,9 @@ import logging
 import matplotlib.pyplot as plt
 import math
 import seaborn as sns
+
+from matplotlib.collections import LineCollection
+from mne.preprocessing.peak_finder import peak_finder
 from IPython import embed as shell
 
 
@@ -21,8 +24,10 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 	Child originating from MNE built-in RawEDF, such that new methods can be added to this built in class
 	'''
 
-	def __init__(self,input_fname,n_eeg = 64, stim_channel  = -1, annot = None, annotmap = None, tal_channel = None, \
+	def __init__(self,input_fname, subject_id, session_id, stim_channel  = -1, annot = None, annotmap = None, tal_channel = None, \
 			hpts = None, preload = True, verbose = None):
+		self.subject_id = subject_id
+		self.session_id = session_id
 		super(RawBDF,self).__init__(input_fname, stim_channel  = stim_channel, annot = annot, annotmap = annotmap, tal_channel = tal_channel,\
 		 	hpts = hpts, preload = preload, verbose = verbose)
 		#logging.info('rawBDF instance was created for subject {0}'.format(input_fname[-8:]))
@@ -42,12 +47,12 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 		self (object): RawBDF with reduced number of channels
 		'''
 
-		if len(self.ch_names) > 73:
-			drop_channels = []
+
+		drop_channels = ['GSR1','GSR2','Erg1','Erg2','Resp','Plet','Temp']
 		for channel in channels_to_remove:
 			drop_channels += [channel + str(i) for i in range(1,33)]
 		
-			self.drop_channels(drop_channels)
+		self.drop_channels(drop_channels)
 
 	def renameChannel(self):
 		'''
@@ -69,7 +74,7 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 				'A32':'CPz','B1':'FPz', 'B2':'FP2','B3':'AF8', 'B4':'AF4','B5':'AFz', 'B6':'Fz','B7':'F2', 'B8':'F4','B9':'F6', 'B10':'F8',
 				'B11':'FT8', 'B12':'FC6','B13':'FC4', 'B14':'FC2','B15':'FCz', 'B16':'Cz','B17':'C2', 'B18':'C4','B19':'C6', 'B20':'T8','B21':'TP8', 
 				'B22':'CP6','B23':'CP4', 'B24':'CP2','B25':'P2', 'B26':'P4','B27':'P6', 'B28':'P8','B29':'P10', 'B30':'PO8','B31':'PO4', 'B32':'O2',
-				'EXG1':'VEOG1','EXG2':'VEOG2','EXG3':'HEOG3','EXG4':'HEOG4','EXG7':'EOGBl','EXG8':'EOGEye',
+				'EXG1':'VEOG1','EXG2':'VEOG2','EXG3':'HEOG1','EXG4':'HEOG2','EXG7':'EOGBl','EXG8':'EOGEye',
 				}
 		
 		channels = ch_names_dict.keys()
@@ -124,21 +129,35 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 			if (event in event_1) and events[event_id + 1, 2] in event_2:
 				events[event_id,2] += 1000
 
-		self.event_list = events		
+		self.event_list = events
 
-class RejectEpochs(mne.Epochs):
+	def eogEpochs(self, nr_electrodes = 64):
+		'''
+		docstring for EOGEpochs
+		'''
+
+		eog_epoch = mne.preprocessing.create_eog_epochs(self,'VEOG1',999,picks = range(nr_electrodes),tmin = -0.5,tmax = 0.5,baseline = (None,None)) 
+		eog_epoch.save(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','subject_' + str(self.subject_id), \
+		'session_' + str(self.session_id), 'eog-epo.fif'))
+
+
+class ProcessEpochs(mne.Epochs):
 	'''
 	Child originating from MNE built-in Epochs, such that new methods can be added to this built in class
 	'''
 
-	def __init__(self, raw_object, events, event_id, tmin, tmax, baseline = (None,0), picks = None, preload = True, \
+	def __init__(self, raw_object, events, event_id, tmin, tmax, subject_id, session_id, baseline, picks = None, preload = True, \
 		decim = 1, on_missing = 'error', verbose = None, filter_padding = 0.2):
+		self.subject_id = subject_id
+		self.session_id = session_id
 		self.epoch_len = tmax - tmin
-		super(RejectEpochs,self).__init__(raw_object, events, event_id, tmin = tmin - filter_padding, tmax = tmax + filter_padding, baseline = baseline,\
+		self.filter_padding = filter_padding
+		super(ProcessEpochs,self).__init__(raw_object, events, event_id, tmin = tmin - filter_padding, tmax = tmax + filter_padding, baseline = baseline,\
 			picks = picks, preload = preload, decim = decim, on_missing = on_missing, verbose = verbose)
 		#logging.info
 
-	def artifactDetection(self, z_threshold = 13, sampl_freq = 512, nr_electrodes = 64, band_pass = [110,140]):
+
+	def artifactDetection(self, z_threshold = 13, sampl_freq = 512, nr_electrodes = 64, band_pass = [110,140], plt_range = 1e-04, plot = True):
 		'''
 		Detect artifacts based on FieldTrip's automatic artifact detection. Artifacts are detected in three steps:
 			1. Filtering the data
@@ -152,7 +171,7 @@ class RejectEpochs(mne.Epochs):
 		all_data_base = np.array(np.hstack([np.matrix(all_data[:,i*len_epoch:i*len_epoch + len_epoch]) - np.matrix(all_data[:,i*len_epoch:i*len_epoch + len_epoch]).mean(axis=1) for i in range(len(self))]))
 
 		# step 1 filter data 
-		all_data_filt = self.filterEpoch(all_data_base, sampl_freq)
+		all_data_filt = self.filterEpoch(all_data_base, sampl_freq,low_pass = band_pass[0], high_pass = band_pass[1])
 		
 		# correct for filter padding
 		len_padded = all_data.shape[1]/len(self)
@@ -169,6 +188,7 @@ class RejectEpochs(mne.Epochs):
 		z_summed = all_data_z.sum(axis = 0)/math.sqrt(nr_electrodes)
 
 		# step 3 threshold z-score per epoch
+		self.info.update({'marked_epochs':[]})
 		for epoch in range(len(self)):	
 			# select channel that contributes most to thresholded z value
 			z_index = np.zeros(z_summed.size, dtype = bool)
@@ -177,42 +197,81 @@ class RejectEpochs(mne.Epochs):
 			index_ch = np.where(z_data == z_data.max())[0][0]
 
 			if z_summed[z_index].max() >= z_threshold:
+				self.info['marked_epochs'].append(epoch)	
+
 				data_2_plot = self[epoch].get_data()[0,:nr_electrodes,:][index_ch,index_epoch]
 				data_2_plot = data_2_plot - data_2_plot.mean()
 				z_2_plot = z_summed[z_index]
 
-				f=plt.figure(figsize = (25,10))
+				if plot:
+					f=plt.figure(figsize = (40,40))
+					
+					with sns.axes_style('dark'):
+
+						ax = f.add_subplot(2,2,1)
+						plt.plot(np.arange(0,z_summed.size),z_summed,color = 'b')
+						plt.plot([0,z_summed.size],[z_threshold,z_threshold], 'r--')
+						plt.fill_between(np.arange(epoch*len_epoch,epoch*len_epoch + len_epoch-1),-50,150, color = 'purple', alpha = 0.5)
+						plt.ylabel('zscore')
+						plt.xlabel('samples')
+						plt.xlim(0,z_summed.size)
+						plt.ylim(-50,200)
+
+						ax = f.add_subplot(4,2,2)	
+						plt.plot(np.arange(0,data_2_plot.size),data_2_plot,color = 'b')	
+						plt.title('Epoch' + str(epoch) + ', channel ' + self.ch_names[index_ch])
+						plt.ylabel('EEG signal (V)')
+						plt.xlabel('samples')
+						plt.xlim(0,data_2_plot.size)
 				
+						ax = f.add_subplot(4,2,4)	
+						plt.plot(np.arange(0,z_2_plot.size),z_2_plot,color = 'b')
+						plt.plot([0,z_2_plot.size],[z_threshold,z_threshold], 'r--')
+						plt.ylabel('zscore')
+						plt.xlabel('samples')	
+						plt.xlim(0,z_2_plot.size)
+		
+						ax = f.add_subplot(212)
+						if epoch == 0:
+							data = np.hstack(self[epoch:epoch + 2].get_data()).T[:,:nr_electrodes]
+						elif epoch == self.events.shape[0] - 1:
+							data = np.hstack(self[epoch - 2:epoch + 1].get_data()).T[:,:nr_electrodes]	
+						else:
+							data = np.hstack(self[epoch - 1:epoch + 2].get_data()).T[:,:nr_electrodes]
+							x_epoch = np.zeros(data.shape[0],dtype = bool)
+							x_epoch[(3*self.filter_padding + self.epoch_len)*self.info['sfreq']:(3*self.filter_padding + self.epoch_len)*self.info['sfreq'] + self.epoch_len*self.info['sfreq']] = True
 
-				with sns.axes_style('dark'):
+						time = data.shape[0]/self.info['sfreq']	* np.arange(data.shape[0],dtype = float)/float(data.shape[0])
+						plt.xlim(0,data.shape[0]/self.info['sfreq'])
+						plt.xticks(np.arange(data.shape[0]/self.info['sfreq']))	
+						
+						dr = (plt_range)*0.35
+						y_min, y_max = -plt_range, (data.shape[1] - 1) * dr + plt_range
+						plt.ylim(y_min,y_max)
 
-					ax = f.add_subplot(1,2,1)
-					plt.plot(np.arange(0,z_summed.size),z_summed,color = 'b')
-					plt.plot([0,z_summed.size],[z_threshold,z_threshold], 'r--')
-					plt.fill_between(np.arange(epoch*len_epoch,epoch*len_epoch + len_epoch-1),-50,150, color = 'purple', alpha = 0.5)
-					plt.ylabel('zscore')
-					plt.xlabel('samples')
-					plt.xlim(0,z_summed.size)
-					plt.ylim(-50,200)
+						segs = []
+						ticklocs = []
+						for ch in range(nr_electrodes):
+							segs.append(np.hstack((time[:,np.newaxis], data[:,ch,np.newaxis])))
+							ticklocs.append(ch*dr)
 
-					ax = f.add_subplot(2,2,2)	
-					plt.plot(np.arange(0,data_2_plot.size),data_2_plot,color = 'b')	
-					plt.title('Epoch' + str(epoch) + ', channel ' + self.ch_names[index_ch])
-					plt.ylabel('EEG signal (V)')
-					plt.xlabel('samples')
-					plt.xlim(0,data_2_plot.size)
-			
-					ax = f.add_subplot(2,2,4)	
-					plt.plot(np.arange(0,z_2_plot.size),z_2_plot,color = 'b')
-					plt.plot([0,z_2_plot.size],[z_threshold,z_threshold], 'r--')
-					plt.ylabel('zscore')
-					plt.xlabel('samples')	
-					plt.xlim(0,z_2_plot.size)
-					#sns.despine(offset=5)
-					#plt.ylim(-50,200)	
+						offsets = np.zeros((nr_electrodes,2), dtype = float)
+						offsets[:,1] = ticklocs
 
-				plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','figs','marked_epoch' + str(epoch) + '.pdf'))
-				plt.close()	
+						lines = LineCollection(segs, offsets = offsets, transOffset = None)
+
+						ax.add_collection(lines)
+						ax.set_yticks(ticklocs)
+						ax.set_yticklabels(self.info['ch_names'][:nr_electrodes])
+
+
+						plt.fill_between(segs[0][x_epoch,0],y_min,y_max, color = 'red', alpha = 0.1)
+						plt.xlabel('Time (s) ')
+						plt.ylabel('Electrode channels')	
+
+					plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
+						'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','epoch_' + str(epoch) + '.pdf'))
+					plt.close()	
 
 	def filterEpoch(self,signal, sampl_freq = 512, low_pass = 110, high_pass = 140):
 		'''
@@ -221,6 +280,198 @@ class RejectEpochs(mne.Epochs):
 
 		b, a = sp.signal.butter(3,[low_pass/2.0/sampl_freq, high_pass/2.0/sampl_freq], btype = 'band')
 		return sp.signal.filtfilt(b,a,signal)
+
+	def dropMarkedEpochs(self):
+		'''
+		doc string dropMarkedEpochs
+		'''
+
+		epochs_2_drop = list(set(self.info['marked_epochs'] + self.info['eye_epochs']))
+		self.drop_epochs(epochs_2_drop, reason = 'User marked')
+		#self.save(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','subject_' + str(self.subject_id), \
+		#'session_' + str(self.session_id), 'processed-epo.fif'))
+
+	def correctArtifactICA(self, n_components = 50, nr_electrodes = 64, EOG = ['VEOG1','VEOG2'], max_comp = 1):
+		'''
+		docstring: CHECK WHETHER HEOG NEEDS TO BE INCLUDED!!!!!!!
+		'''
+
+		eog_events = self.detectBlinks()
+		
+		# select eeg data (1 sec) around blink events 
+		all_data = np.hstack([self[epoch].get_data()[0,:nr_electrodes,:] for epoch in range(len(self))]) 
+		blinks_eeg =np.array([all_data[:,id -self.info['sfreq']/2.0:id+self.info['sfreq']/2.0] for id in eog_events])
+
+		# initiate ICA
+		layout = mne.layouts.read_layout(os.path.join('/Users','Dirk','Dropbox','eeg_analysis','subject_layout_64_std.lout'))
+		ica = mne.preprocessing.ICA(n_components = n_components)
+		ica.fit(self, picks = range(nr_electrodes), decim = 3)
+
+		# select components to remove
+		for eog_ch in EOG:
+			# detect EOG by correlation
+			eog_index, scores = ica.find_bads_eog(self, eog_ch)
+
+			ica.plot_scores(scores, exclude = eog_index, show = False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
+				'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs','ica', 'scores_' + eog_ch + '.pdf'))
+			plt.close()
+
+			show_picks = np.abs(scores).argsort()[::-1][:5]
+			
+			ica.plot_sources(self,show_picks, exclude = eog_index, title = 'Sources related to EOG artifacts (red)', show= False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
+				'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs','ica', 'sources_' + eog_ch + '.pdf'))
+			plt.close()
+
+			if eog_index != []: 
+				ica.plot_components(eog_index[: max_comp], colorbar = True, layout = layout, ch_type = 'eeg', show = False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
+				'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'ica','eog_comp_' + eog_ch + '.pdf'))
+			else:
+				ica.plot_components(show_picks[0], colorbar = True, layout = layout, ch_type = 'eeg', show = False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
+				'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'ica','eog_comp_empty' + eog_ch + '.pdf'))	
+			plt.close()	
+				
+			ica.exclude += eog_index[:max_comp]
+			logging.info('Component {0} excluded with score of {1}'.format(eog_index[:max_comp],scores[eog_index][:max_comp]))
+
+		# remove selected components
+		self = ica.apply(self)  
+	
+		# select eeg data (1 sec) around blink events (after ica)
+		all_data = np.hstack([self[epoch].get_data()[0,:nr_electrodes,:] for epoch in range(len(self))]) 
+		blinks_eeg_ica =np.array([all_data[:,id -self.info['sfreq']/2.0:id+self.info['sfreq']/2.0] for id in eog_events])
+
+		# plot ICA effect
+		for blink_id in range(blinks_eeg_ica.shape[0] + 1):
+			f=plt.figure(figsize = (40,40))
+					
+			with sns.axes_style('dark'):
+
+				if blink_id == 0:
+					data = blinks_eeg.mean(axis = 0).T
+					data_ica = blinks_eeg_ica.mean(axis = 0).T
+					epoch = 'mean_epoch'
+				else:
+					data = blinks_eeg[blink_id-1].T
+					data_ica = blinks_eeg_ica[blink_id-1].T
+					epoch = 'epoch_' + str(blink_id -1)
+
+				ax = f.add_subplot(211)	
+				self.plotEEG(data,ax)
+				ax = f.add_subplot(212)	
+				self.plotEEG(data_ica,ax)
+		
+			plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg',\
+					'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs','ica', 'ica_effect' + epoch + '.pdf'))
+			plt.close()
+
+		# crop epochs to control for filter padding and save epoched data
+		self.crop(self.tmin + self.filter_padding, self.tmax - self.filter_padding)		
+		self.save(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','subject_' + str(self.subject_id), \
+		'session_' + str(self.session_id), 'processed-epo.fif'))
+
+	def plotEEG(self,data, ax, plt_range = 1e-4, nr_electrodes = 64):
+		'''
+		docstring
+		'''
+
+		time = data.shape[0]/self.info['sfreq']	* np.arange(data.shape[0],dtype = float)/float(data.shape[0])
+		plt.xlim(0,data.shape[0]/self.info['sfreq'])
+		plt.xticks(np.arange(data.shape[0]/self.info['sfreq']))	
+		
+		dr = (plt_range)*0.35
+		y_min, y_max = -plt_range, (data.shape[1] - 1) * dr + plt_range
+		plt.ylim(y_min,y_max)
+
+		segs = []
+		ticklocs = []
+		for ch in range(nr_electrodes):
+			segs.append(np.hstack((time[:,np.newaxis], data[:,ch,np.newaxis])))
+			ticklocs.append(ch*dr)
+
+		offsets = np.zeros((nr_electrodes,2), dtype = float)
+		offsets[:,1] = ticklocs
+
+		lines = LineCollection(segs, offsets = offsets, transOffset = None)
+
+		ax.add_collection(lines)
+		ax.set_yticks(ticklocs)
+		ax.set_yticklabels(self.info['ch_names'][:nr_electrodes])
+		plt.xlabel('Time (s) ')
+		plt.ylabel('Electrode channels')
+
+	def detectEyeMovements(self, channels = ['HEOG1','HEOG2'], threshold = 1e-4, window = 0.1, step = 0.05):
+		'''
+		Detect eye movements by marking step like activity that is greater than a given threshold. Based on pop_artstep.m from the ERPLAB Tolbox. 
+		'''
+
+		ch_index = np.array([self.info['ch_names'].index(ch) for ch in channels])
+		data = [self[epoch].get_data()[0,ch_index,:] for epoch in range(len(self))]
+
+		# create sliding window (adjust for samplig frequency)
+		window = int(self.info['sfreq']/(1/window))
+		step = int(self.info['sfreq']/(1/step))
+
+		sl_window = [(i,i + window) for i in range(0,data[0].shape[1] - window, step)]
+		if sl_window[-1][-1] < data[0].shape[1] - 1:
+			sl_window.append((sl_window[-1][0] + 50, data[0].shape[1] - 1))
+
+		# per epoch apply sliding window 	
+		self.info.update({'eye_epochs':[]})
+		for index, ep_data in enumerate(data):
+			for i in range(len(sl_window) - 1):
+				amp_1 = [np.mean(ep_data[ch,sl_window[i][0]:sl_window[i][1]]) for ch in range(len(channels))]
+				amp_2 = [np.mean(ep_data[ch,sl_window[i+1][0]:sl_window[i+1][1]]) for ch in range(len(channels))]
+				test = abs(np.array(amp_1) -np.array(amp_2)) > threshold
+				if  sum(test) != 0:
+					self.info['eye_epochs'].append(index)
+					break		
+
+	def detectBlinks(self,band_pass = [1,10], ch_name = ['VEOG1','VEOG2']):
+		'''
+		docstring
+		'''
+
+		# loop over EOG channels
+		eog_id = [self.info['ch_names'].index(ch) for ch in ch_name]
+		eog = np.vstack([np.hstack([self[epoch].get_data()[0,id,:] for epoch in range(len(self))]) for id in eog_id])
+		len_epoch = eog.shape[1]/len(self)
+		eog_base = np.array(np.hstack([np.matrix(eog[:,i*len_epoch:i*len_epoch + len_epoch]) - np.matrix(eog[:,i*len_epoch:i*len_epoch + len_epoch]).mean(axis=1) \
+				for i in range(len(self))]))
+
+		# filtering to remove dc offset to dissociate between blinks and saccades
+		fmax = np.minimum(45, self.info['sfreq']/2.0 -0.75)
+		filt_eog = self.filterEpoch(eog_base, self.info['sfreq'], low_pass = 2, high_pass = fmax)
+		id_max = np.argmax(np.sqrt(np.sum(filt_eog ** 2,axis = 1)))
+		
+		# easier to detect peaks with filtering
+		filt_eog = self.filterEpoch(eog[id_max], self.info['sfreq'], low_pass = band_pass[0], high_pass = band_pass[1])
+
+		# detecting eog blinks
+		temp = filt_eog - filt_eog.mean()
+		if np.abs(np.max(temp)) > np.abs(np.min(temp)):
+			eog_events, _ = peak_finder(filt_eog, extrema = 1)
+		else:
+			eog_events, _ = peak_finder(filt_eog, extrema = -1)
+
+		# plot blinks
+		blinks = np.array([eog[id_max,id-self.info['sfreq']/2.0:id+self.info['sfreq']/2.0] for id in eog_events])
+
+
+		plt.plot(blinks.T)
+		plt.axvline(x = self.info['sfreq']/2.0, color = 'r')
+		plt.ylabel(ch_name[id_max])
+		plt.ylabel('Time (ms)')
+		plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
+		'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs','ica','detected_blinks.pdf'))
+		plt.close()
+
+		# return time index blinks	
+		return eog_events
+
+
+
+
+
 
 
 class RawEpochs(mne.Epochs):
@@ -393,7 +644,9 @@ class RawEpochs(mne.Epochs):
 						
 			
 			return unique(bad_epochs)			
-			
+	
+
+
 
 	def detectPeaks(signal, mph = None, mpd = 1, threshold = 0, edge = 'rising', kpsh = False, valley = False, show = False, ax = None):
 		'''
@@ -482,8 +735,6 @@ class RawEpochs(mne.Epochs):
 			_plot(signal, ind,mph, mpd, threshold, edge, valley, ax)
 
 		return ind 
-
-
 
 	def _plot(x, ind, mph = None, mpd = 1, threshold = 0, edge =' rising', valley = False, ax = None):
 		"""Plot results of the detect_peaks function, see its help."""
