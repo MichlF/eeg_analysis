@@ -27,11 +27,11 @@ def runWholeSession(ra, Ea,session):
 										201,202,203,204,205,206,207,208,
 										211,212,213,214,215,216,217,218])
 	session.reReference()
-	session.filter(l_freq = 0.5, h_freq = None, h_trans_bandwidth = 0.1)
+	session.filter(l_freq = 0.1, h_freq = None, method = 'iir', iir_params = dict(order=4, ftype='butter'))#l_trans_bandwidth = 0.1 , filter_length = None) # CHECK FILTER LENGTH!!!
 
 	session = ProcessEpochs(session,session.event_list,Ea[0]['event_id_mem'],Ea[1]['timing_mem'][0],Ea[1]['timing_mem'][1],session.subject_id,session.session_id,None)
 	session.detectEyeMovements()
-	session.artifactDetection(z_threshold = 20, plot = True) # CHECK METHOD TO SPECIFY Z VALUE
+	session.artifactDetection(z_cutoff = 4, plot = True) # CHECK METHOD TO SPECIFY Z VALUE
 	session.dropMarkedEpochs()
 	session.correctArtifactICA()
 

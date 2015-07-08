@@ -124,21 +124,11 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 
 		events = mne.find_events(self, stim_channel = stim_channel)
 
-
 		for event_id, event in enumerate(events[:,2]):
 			if (event in event_1) and events[event_id + 1, 2] in event_2:
 				events[event_id,2] += 1000
 
 		self.event_list = events
-
-	def eogEpochs(self, nr_electrodes = 64):
-		'''
-		docstring for EOGEpochs
-		'''
-
-		eog_epoch = mne.preprocessing.create_eog_epochs(self,'VEOG1',999,picks = range(nr_electrodes),tmin = -0.5,tmax = 0.5,baseline = (None,None)) 
-		eog_epoch.save(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','subject_' + str(self.subject_id), \
-		'session_' + str(self.session_id), 'eog-epo.fif'))
 
 
 class ProcessEpochs(mne.Epochs):
@@ -156,70 +146,135 @@ class ProcessEpochs(mne.Epochs):
 			picks = picks, preload = preload, decim = decim, on_missing = on_missing, verbose = verbose)
 		#logging.info
 
+	def baselineEpoch(self, channel_id = 'all', epoch_id = None, baseline_period = False, baseline = (0,200)):
+		'''
+		Baseline correct Epochs. Function can either correct based on the average of the whole epoch or based on a specified period in ms.
+		Functions combines all epochs into a single data array (channels by time).
+		
+		Arguments
+		- - - - -
+		self(object): Epochs object 
+		channel_id (int | list | str): list of channel indices to apply baseline correction. Defaults to all 64 channels
+		epoch_id (int | None): Index of epoch(s) to correct. Defaults to None (apply baseline correction to all epochs)
+		baseline_period (bool): If False baseline correction is applied based on whole epoch.
+		baseline (tuple): Start and end of baseline correction period in ms. Function assumes that an epoch starts at 0 ms. 
 
-	def artifactDetection(self, z_threshold = 13, sampl_freq = 512, nr_electrodes = 64, band_pass = [110,140], plt_range = 1e-04, plot = True):
+
+		Returns
+		- - - -
+		
+		data_base (array): Array with baseline corrected data.
+		'''
+
+		if channel_id == 'all':
+			channel_id = range(64)	
+
+		if epoch_id == None:
+			data = np.hstack([self[epoch].get_data()[0,channel_id,:] for epoch in range(len(self))])	
+			l_epoch = data.shape[1]/len(self)
+		elif isinstance(epoch_id, int):
+			data = self[epoch_id].get_data()[0,channel_id,:]
+		
+		if baseline_period:
+			
+			if baseline[0] != 0:
+				start = int(self.info['sfreq']/(1000/baseline[0]))
+			else:
+				start = baseline[0]	
+			end = int(self.info['sfreq']/(1000/baseline[1]))
+
+			if isinstance(epoch_id, int):
+				data_base = data - data[start:end].mean()
+			else:
+				data = data.reshape(nr_channels,len(self),l_epoch)
+				data_base = np.vstack([np.array(np.matrix(data[ch,:,:]) - np.matrix(data[ch,:,start:end]).mean(axis = 1)).reshape(nr_epochs*l_epoch) for ch in channel_id])
+		else:
+			if isinstance(epoch_id, int):
+				data_base = data - data.mean()
+			else:
+				data_base = np.array(np.hstack([np.matrix(data[:,i*l_epoch:i*l_epoch + l_epoch]) - np.matrix(data[:,i*l_epoch:i*l_epoch + l_epoch]).mean(axis=1) for i in range(len(self))]))
+
+		return data_base
+
+
+	def artifactDetection(self, z_cutoff = 4, nr_channels = 64, band_pass = [110,140], plt_range = 1e-04, plot = True):
 		'''
 		Detect artifacts based on FieldTrip's automatic artifact detection. Artifacts are detected in three steps:
 			1. Filtering the data
-			2. Z-transforming the filtered data and averaging it over channels
+			2. Z-transforming the filtered data and normalize it over channels
 			3. Threshold the accumulated z-score
+
+		Arguments
+		- - - - -
+		self(object): Epochs object 
+		z_cutoff (int): Value that is added to difference between median and min value of accumulated z-score to obtain z-threshold
+		nr_channels (int): Number of channels used for artifact detection. Defualt (64) uses only EEG channels.
+		band_pass (list): Low and High frequency cutoff for band_pass filter
+		plot (bool): If True save detection plots (overview of z scores across epochs, raw signal of channel with highest z score, z distributions, raw signal of all electrodes)
+
+
+		Returns
+		- - - -
+		
+		self.marked_epochs (data): Adds a list of marked epochs to Epoch object
 		'''
 
 		# select data and apply basline correction per epoch
-		all_data = np.hstack([self[epoch].get_data()[0,:nr_electrodes,:] for epoch in range(len(self))])
-		len_epoch = all_data.shape[1]/len(self)
-		all_data_base = np.array(np.hstack([np.matrix(all_data[:,i*len_epoch:i*len_epoch + len_epoch]) - np.matrix(all_data[:,i*len_epoch:i*len_epoch + len_epoch]).mean(axis=1) for i in range(len(self))]))
+		data = self.baselineEpoch()
 
-		# step 1 filter data 
-		all_data_filt = self.filterEpoch(all_data_base, sampl_freq,low_pass = band_pass[0], high_pass = band_pass[1])
+		# step 1: Filter data 
+		#data = mne.filter.band_pass_filter(data, self.info['sfreq'], band_pass[0], band_pass[1], filter_length = None) # CHECK EFFECT OF FILTER LENGTH
+		data = self.filterEpoch(data, self.info['sfreq'],low_pass = band_pass[0], high_pass = band_pass[1])
 		
-		# correct for filter padding
-		len_padded = all_data.shape[1]/len(self)
-		len_epoch = int(np.ceil(self.epoch_len*sampl_freq))
+		# correct for filter padding (select Epoch data only)
+		l_pad, l_epoch = (data.shape[1]/len(self), int(self.epoch_len*self.info['sfreq']))
+		start_epoch = (l_pad - l_epoch)/2
+		id_epoch = np.zeros(l_pad, dtype = bool)
+		id_epoch[start_epoch: start_epoch + l_epoch] = True
+		id_epoch_all = np.tile(id_epoch, len(self))
+		data = data[:,id_epoch_all] 
 
-		index_epoch = np.zeros(len_padded, dtype = bool)
-		index_epoch[(len_padded - len_epoch)/2 : (len_padded - len_epoch)/2 + len_epoch] = True
-		index_epoch_tiled = np.tile(index_epoch, len(self))
-		all_data_filt = all_data_filt[:,index_epoch_tiled]
-
-		# step 2 z transform filtered data
-		all_data_amp = np.abs(sp.signal.hilbert(all_data_filt))
-		all_data_z = (all_data_amp - all_data_amp.mean())/all_data_amp.std()
-		z_summed = all_data_z.sum(axis = 0)/math.sqrt(nr_electrodes)
+		# step 2: Z-transform data
+		data_amp = np.abs(sp.signal.hilbert(data))
+		z_data = (data_amp - data_amp.mean())/data_amp.std()
+		z_data_norm = z_data.sum(axis = 0)/math.sqrt(nr_channels)
+		z_threshold = np.median(z_data_norm) + abs(z_data_norm.min()- np.median(z_data_norm)) + z_cutoff # CHECK WITH JORAM!!!!
 
 		# step 3 threshold z-score per epoch
 		self.info.update({'marked_epochs':[]})
-		for epoch in range(len(self)):	
-			# select channel that contributes most to thresholded z value
-			z_index = np.zeros(z_summed.size, dtype = bool)
-			z_index[epoch*len_epoch:epoch*len_epoch + len_epoch] = True
-			z_data = all_data_z[:,z_index]
-			index_ch = np.where(z_data == z_data.max())[0][0]
 
-			if z_summed[z_index].max() >= z_threshold:
+		for epoch in range(len(self)):	# loop over all epochs
+			# select channel that contributes most to thresholded z value
+			z_id = np.zeros(z_data_norm.size, dtype = bool)
+			start = epoch*l_epoch
+			z_id[start:start + l_epoch] = True
+			epoch_data = z_data[:, z_id]
+			ch_id = np.where(epoch_data == epoch_data.max())[0][0]
+			
+			if z_data_norm[z_id].max() >= z_threshold:
+
 				self.info['marked_epochs'].append(epoch)	
 
-				data_2_plot = self[epoch].get_data()[0,:nr_electrodes,:][index_ch,index_epoch]
-				data_2_plot = data_2_plot - data_2_plot.mean()
-				z_2_plot = z_summed[z_index]
-
 				if plot:
+
+					data_2_plot = self.baselineEpoch(channel_id = ch_id, epoch_id = epoch, baseline_period = False)[id_epoch]
+					z_2_plot = z_data_norm[z_id]
+				
 					f=plt.figure(figsize = (40,40))
-					
 					with sns.axes_style('dark'):
 
 						ax = f.add_subplot(2,2,1)
-						plt.plot(np.arange(0,z_summed.size),z_summed,color = 'b')
-						plt.plot([0,z_summed.size],[z_threshold,z_threshold], 'r--')
-						plt.fill_between(np.arange(epoch*len_epoch,epoch*len_epoch + len_epoch-1),-50,150, color = 'purple', alpha = 0.5)
+						plt.plot(np.arange(0,z_data_norm.size),z_data_norm,color = 'b')
+						plt.plot([0,z_data_norm.size],[z_threshold,z_threshold], 'r--')
+						plt.fill_between(np.arange(epoch*l_epoch,epoch*l_epoch + l_epoch-1),-50,150, color = 'purple', alpha = 0.5)
 						plt.ylabel('zscore')
 						plt.xlabel('samples')
-						plt.xlim(0,z_summed.size)
+						plt.xlim(0,z_data_norm.size)
 						plt.ylim(-50,200)
 
 						ax = f.add_subplot(4,2,2)	
 						plt.plot(np.arange(0,data_2_plot.size),data_2_plot,color = 'b')	
-						plt.title('Epoch' + str(epoch) + ', channel ' + self.ch_names[index_ch])
+						plt.title('Epoch' + str(epoch) + ', channel ' + self.ch_names[ch_id])
 						plt.ylabel('EEG signal (V)')
 						plt.xlabel('samples')
 						plt.xlim(0,data_2_plot.size)
@@ -233,41 +288,21 @@ class ProcessEpochs(mne.Epochs):
 		
 						ax = f.add_subplot(212)
 						if epoch == 0:
-							data = np.hstack(self[epoch:epoch + 2].get_data()).T[:,:nr_electrodes]
-						elif epoch == self.events.shape[0] - 1:
-							data = np.hstack(self[epoch - 2:epoch + 1].get_data()).T[:,:nr_electrodes]	
-						else:
-							data = np.hstack(self[epoch - 1:epoch + 2].get_data()).T[:,:nr_electrodes]
+							data = np.hstack(self[epoch:epoch + 2].get_data()).T[:,:nr_channels]
 							x_epoch = np.zeros(data.shape[0],dtype = bool)
-							x_epoch[(3*self.filter_padding + self.epoch_len)*self.info['sfreq']:(3*self.filter_padding + self.epoch_len)*self.info['sfreq'] + self.epoch_len*self.info['sfreq']] = True
+							x_epoch[int(self.filter_padding*self.info['sfreq']): int(self.filter_padding*self.info['sfreq']+ self.epoch_len*self.info['sfreq'])] = True
+							x_min, x_max = (self.filter_padding, self.filter_padding + self.epoch_len)
+						else:
+							if epoch == self.events.shape[0] - 1:
+								data = np.hstack(self[epoch - 2:epoch + 1].get_data()).T[:,:nr_channels]
+							else:
+								data = np.hstack(self[epoch - 1:epoch + 2].get_data()).T[:,:nr_channels]
 
-						time = data.shape[0]/self.info['sfreq']	* np.arange(data.shape[0],dtype = float)/float(data.shape[0])
-						plt.xlim(0,data.shape[0]/self.info['sfreq'])
-						plt.xticks(np.arange(data.shape[0]/self.info['sfreq']))	
-						
-						dr = (plt_range)*0.35
-						y_min, y_max = -plt_range, (data.shape[1] - 1) * dr + plt_range
-						plt.ylim(y_min,y_max)
+							x_epoch = np.zeros(data.shape[0],dtype = bool)
+							x_epoch[int((3*self.filter_padding + self.epoch_len)*self.info['sfreq']):int((3*self.filter_padding + self.epoch_len)*self.info['sfreq'] + self.epoch_len*self.info['sfreq'])] = True				
+							x_min, x_max = (3*self.filter_padding+self.epoch_len, 3*self.filter_padding+ 2*self.epoch_len)
 
-						segs = []
-						ticklocs = []
-						for ch in range(nr_electrodes):
-							segs.append(np.hstack((time[:,np.newaxis], data[:,ch,np.newaxis])))
-							ticklocs.append(ch*dr)
-
-						offsets = np.zeros((nr_electrodes,2), dtype = float)
-						offsets[:,1] = ticklocs
-
-						lines = LineCollection(segs, offsets = offsets, transOffset = None)
-
-						ax.add_collection(lines)
-						ax.set_yticks(ticklocs)
-						ax.set_yticklabels(self.info['ch_names'][:nr_electrodes])
-
-
-						plt.fill_between(segs[0][x_epoch,0],y_min,y_max, color = 'red', alpha = 0.1)
-						plt.xlabel('Time (s) ')
-						plt.ylabel('Electrode channels')	
+						self.plotEEG(data,ax,fill = True, x_min = x_min, x_max = x_max)
 
 					plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
 						'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','epoch_' + str(epoch) + '.pdf'))
@@ -365,11 +400,12 @@ class ProcessEpochs(mne.Epochs):
 			plt.close()
 
 		# crop epochs to control for filter padding and save epoched data
-		self.crop(self.tmin + self.filter_padding, self.tmax - self.filter_padding)		
+		#self.crop(self.tmin + self.filter_padding, self.tmax - self.filter_padding)		
 		self.save(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','subject_' + str(self.subject_id), \
 		'session_' + str(self.session_id), 'processed-epo.fif'))
 
-	def plotEEG(self,data, ax, plt_range = 1e-4, nr_electrodes = 64):
+
+	def plotEEG(self,data, ax, plt_range = 1e-4, nr_channels = 64, fill = False, x_min = None, x_max = None):
 		'''
 		docstring
 		'''
@@ -384,20 +420,22 @@ class ProcessEpochs(mne.Epochs):
 
 		segs = []
 		ticklocs = []
-		for ch in range(nr_electrodes):
+		for ch in range(nr_channels):
 			segs.append(np.hstack((time[:,np.newaxis], data[:,ch,np.newaxis])))
 			ticklocs.append(ch*dr)
 
-		offsets = np.zeros((nr_electrodes,2), dtype = float)
+		offsets = np.zeros((nr_channels,2), dtype = float)
 		offsets[:,1] = ticklocs
 
 		lines = LineCollection(segs, offsets = offsets, transOffset = None)
 
 		ax.add_collection(lines)
 		ax.set_yticks(ticklocs)
-		ax.set_yticklabels(self.info['ch_names'][:nr_electrodes])
+		ax.set_yticklabels(self.info['ch_names'][:nr_channels])
 		plt.xlabel('Time (s) ')
 		plt.ylabel('Electrode channels')
+		if fill:
+			plt.fill_between(time[np.where(np.logical_and(time>=x_min, time<=x_max))[0]],y_min, y_max,color = 'red', alpha = 0.1)
 
 	def detectEyeMovements(self, channels = ['HEOG1','HEOG2'], threshold = 1e-4, window = 0.1, step = 0.05):
 		'''
@@ -860,7 +898,14 @@ def setEOGReference (raw, ref_channels_blink = ['VEOG1','VEOG2'], ref_channels_e
 
 
 
+	def eogEpochs(self, nr_electrodes = 64):
+		'''
+		docstring for EOGEpochs
+		'''
 
+		eog_epoch = mne.preprocessing.create_eog_epochs(self,'VEOG1',999,picks = range(nr_electrodes),tmin = -0.5,tmax = 0.5,baseline = (None,None)) 
+		eog_epoch.save(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','subject_' + str(self.subject_id), \
+		'session_' + str(self.session_id), 'eog-epo.fif'))
   
 
 
