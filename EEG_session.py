@@ -10,9 +10,9 @@ from IPython import embed as shell
 import os 
 
 
-this_raw_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','raw_eeg') 
-this_project_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg')
-subjects = 4
+this_raw_folder = os.path.join(os.getcwd(),'EEG')
+this_project_folder = os.path.join(os.getcwd(),'analysis')
+subjects = 1
 
 def runWholeSession(ra, Ea,session):
 
