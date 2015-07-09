@@ -12,11 +12,9 @@ import os
 
 this_raw_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','raw_eeg')
 this_project_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg')
-subjects = 1
+subjects = 12
 
 combine_sessions = True
-
-
 
 def runWholeSession(ra, Ea,session):
 
