@@ -67,7 +67,7 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 
 		Returns
 		- - - -
-		self(object): raw object with changed channel names following biosemi 64 naming scheme
+		self(object): raw object with changed channel names following biosemi 64 naming scheme (10 - 20 system)
 		'''
 
 		ch_names_dict = {
@@ -87,9 +87,11 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 			self.ch_names[self.ch_names.index(channel)] = new_channels[ch_ind]
 			self.info['chs'][self.ch_names.index(new_channels[ch_ind])]['ch_name'] = new_channels[ch_ind]		
 
-	def reReference(self, ref_chans=['EXG5','EXG6']):
+	def reReference(self, ref_chans=['EXG5','EXG6'], vEOG = ['VEOG1','VEOG2','EOGBl'], hEOG = ['HEOG1','HEOG2','EOGEye']):
 		'''
-		Rereference raw data to reference channels. By default data is rereferenced to the mastoids  
+		Rereference raw data to reference channels. By default data is rereferenced to the mastoids.
+		Also EOG data is rerefenced. Subtraction of VEOG and HEOG results in a blink channel and an eyemovement channel.
+		After rereferencing redundant channels are removed  
 
 		Arguments
 		- - - - -
@@ -101,13 +103,19 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 		self (object): Rereferenced raw eeg data
 		'''
 
+		# rereference all channels (EEG and EOG) to reference channels 
 		logging.info('Data was rereferenced to channels ' + ', '.join(ref_chans))
 		(self, ref_data) = mne.io.set_eeg_reference(self, ref_chans, copy=False)
         
-		for ch_ind, channel in enumerate(ref_chans):
-			self.info['chs'][self.ch_names.index(channel)]['kind'] = 502
-        
-		self.info['bads'] += ref_chans 
+		# rerefence EOG data (vertical and horizontal)
+		v_id = [self.info['ch_names'].index(vert) for vert in vEOG]
+		h_id = [self.info['ch_names'].index(vert) for hor in hEOG]
+
+		self[v_id[2]][0][0] = self[v_id[0]][0] - self[v_id[1]][0]
+		self[h_id[2]][0][0] = self[h_id[0]][0] - self[h_id[1]][0]
+
+		# drop ref chans
+		self.drop_channels(ref_chans)
 
 	def changeEventCodes(self, event_1 = [], event_2 = [], stim_channel = 'STI 014'):
 		'''

@@ -95,7 +95,7 @@ for plot_id, condition in enumerate(conditions):
 	plt.legend(loc='upper right', shadow=True)
 	plt.title(condition)
 
-plt.savefig('subject_average_erp.pdf')
+plt.savefig('subject_average_erp_0.1.pdf')
 
 f=plt.figure(figsize = (8,8))
 plot_data = []

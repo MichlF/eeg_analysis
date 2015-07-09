@@ -10,15 +10,18 @@ from IPython import embed as shell
 import os 
 
 
-this_raw_folder = os.path.join(os.getcwd(),'EEG')
-this_project_folder = os.path.join(os.getcwd(),'analysis')
+this_raw_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','raw_eeg')
+this_project_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg')
 subjects = 1
+
+combine_sessions = True
+
+
 
 def runWholeSession(ra, Ea,session):
 
 	###############
 	#PREPROCESSING
-
 	session.dropEmptyChannels()
 	session.renameChannel()
 	session.changeEventCodes(event_1 = [100,109,110,119,200,209,210,219],
@@ -26,10 +29,14 @@ def runWholeSession(ra, Ea,session):
 										111,112,113,114,115,116,117,118,
 										201,202,203,204,205,206,207,208,
 										211,212,213,214,215,216,217,218])
-	session.reReference()
-	session.filter(l_freq = 0.1, h_freq = None, method = 'iir', iir_params = dict(order=4, ftype='butter'))#l_trans_bandwidth = 0.1 , filter_length = None) # CHECK FILTER LENGTH!!!
+	
+	session.reReference() 
+	session.filter(l_freq = 0.1, h_freq = None, filter_length = None, method = 'iir', iir_params = dict(order=4, ftype='butter')) 
 
 	session = ProcessEpochs(session,session.event_list,Ea[0]['event_id_mem'],Ea[1]['timing_mem'][0],Ea[1]['timing_mem'][1],session.subject_id,session.session_id,None)
+	### INSERT BASELINE CORRECTION HERE ????????????
+	### ARTIFACT DETECTION ON RAW OR FILTERED DATA
+
 	session.detectEyeMovements()
 	session.artifactDetection(z_cutoff = 4, plot = True) # CHECK METHOD TO SPECIFY Z VALUE
 	session.dropMarkedEpochs()
@@ -54,8 +61,8 @@ if __name__ == '__main__':
 								'1_neutral_left_dual': 1110,'1_neutral_right_dual': 1119,'2_match_left_dual': 1200,'2_match_right_dual': 1209,'2_neutral_left_dual': 1210,
 								'2_neutral_right_dual': 1219}, },
 
-				{'timing_mem':[-0.2,1.2,None]},	# tmin, tmax, baseline	CHECK WHETHER BASELINE CORRECTION IS NECESSARY!!!!!!!!!!!!		
-				#{'timing_mem':[0.8,1.9,None]},
+				{'timing_mem':[-0.2,1.2,None]},			
+
 
 				{'event_id_search': {'1_match_up_left': 101,'1_match_up_right': 102,'1_match_down_left': 103,'1_match_down_right': 104,'1_match_left_up': 105,'1_match_left_down': 106,
 									'1_match_right_up': 107,'1_match_right_down': 108,'1_neutral_up_left': 111,'1_neutral_up_right': 112,'1_neutral_down_left': 113,
@@ -64,8 +71,14 @@ if __name__ == '__main__':
 									'2_match_right_up': 207,'2_match_right_down': 208,'2_neutral_up_left': 211,'2_neutral_up_right': 212,'2_neutral_down_left': 213,'2_neutral_down_right': 214,
 									'2_neutral_left_up': 215,'2_neutral_left_down': 216,'2_neutral_right_up': 217,'2_neutral_right_down': 218}},						]		
 
-		for session in EEG_run_array:						
-			EEG_session = RawBDF(session['raw_data_path'],subject_id,session['session'])
+		
+		if combine_sessions:						
+			EEG_session_comb = mne.concatenate_raws([RawBDF(session['raw_data_path'],subject_id,session['session']) for session in EEG_run_array])
+			runWholeSession(EEG_run_array, EEG_ERP_array, EEG_session_comb)	
 
-			runWholeSession(EEG_run_array, EEG_ERP_array, EEG_session)	
+		else:			
+			for session in EEG_run_array:						
+				EEG_session = RawBDF(session['raw_data_path'],subject_id,session['session'])
+
+				runWholeSession(EEG_run_array, EEG_ERP_array, EEG_session)	
 
