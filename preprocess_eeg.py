@@ -13,6 +13,7 @@ import logging
 import matplotlib.pyplot as plt
 import math
 import seaborn as sns
+import itertools
 
 from matplotlib.collections import LineCollection
 from mne.preprocessing.peak_finder import peak_finder
@@ -43,7 +44,6 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 
 		Returns
 		- - - -
-		
 		self (object): RawBDF with reduced number of channels
 		'''
 
@@ -65,6 +65,9 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 		channels (list of strings): name of cnannels to be renamed
 		new_names (list of strings): new names for the channels specified by channels argument
 
+		Returns
+		- - - -
+		self(object): raw object with changed channel names following biosemi 64 naming scheme
 		'''
 
 		ch_names_dict = {
@@ -316,15 +319,25 @@ class ProcessEpochs(mne.Epochs):
 		b, a = sp.signal.butter(3,[low_pass/2.0/sampl_freq, high_pass/2.0/sampl_freq], btype = 'band')
 		return sp.signal.filtfilt(b,a,signal)
 
-	def dropMarkedEpochs(self):
+	def dropMarkedEpochs(self, epochs = ['marked_epochs', 'eye_epochs']):
 		'''
-		doc string dropMarkedEpochs
-		'''
+		Drop epochs as marked by the noise detection (artifactDetection and detectEyeMovements) functions. Uses MNE built in drop_epochs function.
+		For extra info see doc string of mne.drop_epochs
 
-		epochs_2_drop = list(set(self.info['marked_epochs'] + self.info['eye_epochs']))
-		self.drop_epochs(epochs_2_drop, reason = 'User marked')
-		#self.save(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','subject_' + str(self.subject_id), \
-		#'session_' + str(self.session_id), 'processed-epo.fif'))
+		Arguments
+		- - - - -
+		self(object): Epochs object 
+		epochs (list of strings): List of epochs to drop as added by noise detection functions
+
+		Returns
+		- - - -
+		
+		self(object): Epochs object without marked epochs
+		'''	
+
+		drop_epochs = sorted(list(set([i for i in itertools.chain.from_iterable([self.info[ep] for ep in epochs])])))
+		self.drop_epochs(drop_epochs, reason = 'User marked')
+
 
 	def correctArtifactICA(self, n_components = 50, nr_electrodes = 64, EOG = ['VEOG1','VEOG2'], max_comp = 1):
 		'''
