@@ -10,6 +10,7 @@ import os
 import numpy as np
 import scipy as sp
 import logging
+import matplotlib
 import matplotlib.pyplot as plt
 import math
 import seaborn as sns
@@ -18,6 +19,7 @@ import itertools
 from matplotlib.collections import LineCollection
 from mne.preprocessing.peak_finder import peak_finder
 from IPython import embed as shell
+from math import ceil, floor
 
 
 class RawBDF(mne.io.edf.edf.RawEDF):
@@ -25,12 +27,12 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 	Child originating from MNE built-in RawEDF, such that new methods can be added to this built in class
 	'''
 
-	def __init__(self,input_fname, subject_id, session_id, stim_channel  = -1, annot = None, annotmap = None, tal_channel = None, \
+	def __init__(self,input_fname,subject_id, session_id, montage = None, stim_channel  = -1, annot = None, annotmap = None, tal_channel = None, \
 			hpts = None, preload = True, verbose = None):
 		self.subject_id = subject_id
 		self.session_id = session_id
-		super(RawBDF,self).__init__(input_fname, stim_channel  = stim_channel, annot = annot, annotmap = annotmap, tal_channel = tal_channel,\
-		 	hpts = hpts, preload = preload, verbose = verbose)
+		super(RawBDF,self).__init__(input_fname, montage = montage, stim_channel  = stim_channel, annot = annot, annotmap = annotmap, tal_channel = tal_channel,\
+		 	preload = preload, verbose = verbose)
 		#logging.info('rawBDF instance was created for subject {0}'.format(input_fname[-8:]))
 
 
@@ -114,6 +116,7 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 		self[v_id[2]][0][0] = self[v_id[0]][0] - self[v_id[1]][0]
 		self[h_id[2]][0][0] = self[h_id[0]][0] - self[h_id[1]][0]
 
+
 		# drop ref chans
 		self.drop_channels(ref_chans)
 
@@ -133,12 +136,11 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 		self.event_list (data): Adds event_list to RawBDF object
 		'''
 
-		events = mne.find_events(self, stim_channel = stim_channel)
-
+		events = mne.find_events(self, stim_channel = stim_channel, consecutive = False) 
+		# ADD UPDATE INCLUDE EVENT COUNT CHECK IN BEHAVIORAL LOG FILE
 		for event_id, event in enumerate(events[:,2]):
 			if (event in event_1) and events[event_id + 1, 2] in event_2:
-				events[event_id,2] += 1000
-
+				events[event_id,2] += 1000		
 		self.event_list = events
 
 
@@ -147,14 +149,21 @@ class ProcessEpochs(mne.Epochs):
 	Child originating from MNE built-in Epochs, such that new methods can be added to this built in class
 	'''
 
-	def __init__(self, raw_object, events, event_id, tmin, tmax, subject_id, session_id, baseline, picks = None, preload = True, \
-		decim = 1, on_missing = 'error', verbose = None, filter_padding = 0.2):
+	def __init__(self, raw_object, events, event_id, tmin, tmax, baseline, subject_id, session_id, art_detect = False, trl_pad = 0, flt_pad = 0.5, art_pad = 0, box_car = 0.2, picks = None, preload = True, \
+		decim = 1, on_missing = 'error', verbose = None, proj = False):
 		self.subject_id = subject_id
 		self.session_id = session_id
+		self.art_detect = art_detect
+		self.flt_pad = flt_pad
+		self.art_pad = art_pad
+		self.trl_pad = trl_pad
+		self.box_car = box_car
 		self.epoch_len = tmax - tmin
-		self.filter_padding = filter_padding
-		super(ProcessEpochs,self).__init__(raw_object, events, event_id, tmin = tmin - filter_padding, tmax = tmax + filter_padding, baseline = baseline,\
-			picks = picks, preload = preload, decim = decim, on_missing = on_missing, verbose = verbose)
+		if art_detect:
+			tmin -= (trl_pad + flt_pad)
+			tmax += (trl_pad + flt_pad)
+		super(ProcessEpochs,self).__init__(raw_object, events, event_id, tmin = tmin, tmax = tmax, baseline = baseline,\
+			picks = picks, preload = preload, decim = decim, on_missing = on_missing, verbose = verbose, proj = proj)
 		#logging.info
 
 	def baselineEpoch(self, channel_id = 'all', epoch_id = None, baseline_period = False, baseline = (0,200)):
@@ -230,94 +239,109 @@ class ProcessEpochs(mne.Epochs):
 		self.marked_epochs (data): Adds a list of marked epochs to Epoch object
 		'''
 
-		# select data and apply basline correction per epoch
-		data = self.baselineEpoch()
-
-		# step 1: Filter data 
-		#data = mne.filter.band_pass_filter(data, self.info['sfreq'], band_pass[0], band_pass[1], filter_length = None) # CHECK EFFECT OF FILTER LENGTH
-		data = self.filterEpoch(data, self.info['sfreq'],low_pass = band_pass[0], high_pass = band_pass[1])
+		epoch_data = []
 		
-		# correct for filter padding (select Epoch data only)
-		l_pad, l_epoch = (data.shape[1]/len(self), int(self.epoch_len*self.info['sfreq']))
-		start_epoch = (l_pad - l_epoch)/2
-		id_epoch = np.zeros(l_pad, dtype = bool)
-		id_epoch[start_epoch: start_epoch + l_epoch] = True
-		id_epoch_all = np.tile(id_epoch, len(self))
-		data = data[:,id_epoch_all] 
+		for ep in range(len(self)):
 
-		# step 2: Z-transform data
-		data_amp = np.abs(sp.signal.hilbert(data))
-		z_data = (data_amp - data_amp.mean())/data_amp.std()
-		z_data_norm = z_data.sum(axis = 0)/math.sqrt(nr_channels)
-		z_threshold = np.median(z_data_norm) + abs(z_data_norm.min()- np.median(z_data_norm)) + z_cutoff # CHECK WITH JORAM!!!!
-
-		# step 3 threshold z-score per epoch
-		self.info.update({'marked_epochs':[]})
-
-		for epoch in range(len(self)):	# loop over all epochs
-			# select channel that contributes most to thresholded z value
-			z_id = np.zeros(z_data_norm.size, dtype = bool)
-			start = epoch*l_epoch
-			z_id[start:start + l_epoch] = True
-			epoch_data = z_data[:, z_id]
-			ch_id = np.where(epoch_data == epoch_data.max())[0][0]
+		# STEP 1: select data and filter data
+			data = self[ep].get_data()[0,range(nr_channels),:]
 			
-			if z_data_norm[z_id].max() >= z_threshold:
+			if ep == 0:
+				id_epoch = np.ones(data.shape[1], dtype = bool)
+				id_epoch[:int((self.flt_pad*self.info['sfreq']))] = False
+				id_epoch[int((-self.flt_pad*self.info['sfreq'])):] = False
 
-				self.info['marked_epochs'].append(epoch)	
+			data = mne.filter.band_pass_filter(data, self.info['sfreq'],band_pass[0], band_pass[1], method = 'iir', iir_params = dict(order=9, ftype='butter')) # CHECK FILTER DIRECTION, compare to FIELDTRIP SETTINGS		
+			data = np.abs(sp.signal.hilbert(data)) 
+			
+			# box_car smoothing
+			data = self.boxSmoothing(data)
 
-				if plot:
+			# remove filter padding
+			data = data[:,id_epoch]
+			epoch_data.append(data)
 
-					data_2_plot = self.baselineEpoch(channel_id = ch_id, epoch_id = epoch, baseline_period = False)[id_epoch]
-					z_2_plot = z_data_norm[z_id]
-				
-					f=plt.figure(figsize = (40,40))
-					with sns.axes_style('dark'):
-
-						ax = f.add_subplot(2,2,1)
-						plt.plot(np.arange(0,z_data_norm.size),z_data_norm,color = 'b')
-						plt.plot([0,z_data_norm.size],[z_threshold,z_threshold], 'r--')
-						plt.fill_between(np.arange(epoch*l_epoch,epoch*l_epoch + l_epoch-1),-50,150, color = 'purple', alpha = 0.5)
-						plt.ylabel('zscore')
-						plt.xlabel('samples')
-						plt.xlim(0,z_data_norm.size)
-						plt.ylim(-50,200)
-
-						ax = f.add_subplot(4,2,2)	
-						plt.plot(np.arange(0,data_2_plot.size),data_2_plot,color = 'b')	
-						plt.title('Epoch' + str(epoch) + ', channel ' + self.ch_names[ch_id])
-						plt.ylabel('EEG signal (V)')
-						plt.xlabel('samples')
-						plt.xlim(0,data_2_plot.size)
-				
-						ax = f.add_subplot(4,2,4)	
-						plt.plot(np.arange(0,z_2_plot.size),z_2_plot,color = 'b')
-						plt.plot([0,z_2_plot.size],[z_threshold,z_threshold], 'r--')
-						plt.ylabel('zscore')
-						plt.xlabel('samples')	
-						plt.xlim(0,z_2_plot.size)
+		# STEP 2: Z-transform data
+		epoch_comb = np.hstack(epoch_data)
+		avg_data = epoch_comb.mean(axis = 1).reshape(-1,1)
+		std_data = epoch_comb.std(axis = 1).reshape(-1,1)
+		z_data = [(epoch - avg_data)/std_data  for epoch in epoch_data] 
 		
-						ax = f.add_subplot(212)
-						if epoch == 0:
-							data = np.hstack(self[epoch:epoch + 2].get_data()).T[:,:nr_channels]
-							x_epoch = np.zeros(data.shape[0],dtype = bool)
-							x_epoch[int(self.filter_padding*self.info['sfreq']): int(self.filter_padding*self.info['sfreq']+ self.epoch_len*self.info['sfreq'])] = True
-							x_min, x_max = (self.filter_padding, self.filter_padding + self.epoch_len)
-						else:
-							if epoch == self.events.shape[0] - 1:
-								data = np.hstack(self[epoch - 2:epoch + 1].get_data()).T[:,:nr_channels]
-							else:
-								data = np.hstack(self[epoch - 1:epoch + 2].get_data()).T[:,:nr_channels]
+		# STEP 3 threshold z-score per epoch
+		z_accumel = np.hstack(z_data).sum(axis = 0)/math.sqrt(nr_channels)
+		z_accumel_ep = [np.array(z.sum(axis = 0)/math.sqrt(nr_channels)) for z in z_data]
+		z_thresh = np.median(z_accumel) + abs(z_accumel.min() - np.median(z_accumel)) + z_cutoff
 
-							x_epoch = np.zeros(data.shape[0],dtype = bool)
-							x_epoch[int((3*self.filter_padding + self.epoch_len)*self.info['sfreq']):int((3*self.filter_padding + self.epoch_len)*self.info['sfreq'] + self.epoch_len*self.info['sfreq'])] = True				
-							x_min, x_max = (3*self.filter_padding+self.epoch_len, 3*self.filter_padding+ 2*self.epoch_len)
+		# Loop over all epochs to plot results
+		bad_epoch = []
 
-						self.plotEEG(data,ax,fill = True, x_min = x_min, x_max = x_max)
+		for ep in range(len(self)):
 
-					plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
-						'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','epoch_' + str(epoch) + '.pdf'))
-					plt.close()	
+			ch_id = np.where(z_data[ep] == z_data[ep].max())[0][0]
+
+			# check if epoch contains artifact
+			if (z_accumel_ep[ep] > z_thresh).sum() > 0:
+				bad_epoch.append(ep)
+
+			if plot:
+				data_2_plot = self[ep].get_data()[0][ch_id,id_epoch]
+				z_2_plot = z_accumel_ep[ep]	
+				if ep == 0:
+					id_trial = np.ones(data_2_plot.size, dtype = bool)
+					id_trial[:int((self.trl_pad*self.info['sfreq']))] = False
+					id_trial[int((-self.trl_pad*self.info['sfreq'])):] = False
+
+				plt.figure(figsize = (40,20))
+				with sns.axes_style('dark'):
+					
+					matplotlib.rcParams.update({'font.size':70})
+
+					ax = plt.subplot(121, xlabel = 'samples', ylabel = 'z_value', xlim = (0,z_accumel.size), ylim = (-20,40))
+					plt.plot(np.arange(0,z_accumel.size),z_accumel,color = 'b')
+					plt.plot(np.arange(0,z_accumel.size)[ep*id_trial.size:ep*id_trial.size + id_trial.size],z_2_plot,color = 'r')
+					plt.plot(np.arange(0,z_accumel.size),np.ma.masked_less(z_accumel, z_thresh),color = 'r')
+					ax.axhline(z_thresh, color = 'r', ls = '--')
+
+					start, end = (self.tmin + self.flt_pad, self.tmax - self.flt_pad)
+
+					ax = plt.subplot(222, xlabel = 'Time (s)', ylabel = 'EEG signal (V)', title = 'Epoch ' + str(ep) + ', channel ' + self.ch_names[ch_id], xlim = (start,end))
+					plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size),data_2_plot,color = '#95B8BA')	
+					plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size)[id_trial],data_2_plot[id_trial],color = 'b')	
+
+					ax = plt.subplot(224, xlabel = 'Time (s)', ylabel = 'z_value', xlim = (start,end), ylim = (-20,40))
+					plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size),z_2_plot,color = '#95B8BA')
+					plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size)[id_trial],z_2_plot[id_trial],color = 'b')
+					plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size),np.ma.masked_less(z_2_plot, z_thresh),color = 'r')
+					ax.axhline(z_thresh, color = 'r', ls = '--')	
+
+				plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
+				'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','epoch_' + str(ep) + '.pdf'))
+				plt.close()			
+
+		np.savetxt(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
+				'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','marked_epochs.txt'), \
+				np.array(bad_epoch, dtype = int), fmt = '%u')	
+
+	def boxSmoothing(self, data):
+		'''
+		doc string boxSmoothing
+		'''
+
+		pad = int(round(self.box_car*self.info['sfreq']))
+		if pad % 2 == 0:
+			# the kernel should have an odd number of samples
+			pad += 1
+			kernel = np.ones(pad)/pad
+		pad = int(ceil(pad/2))
+		pre_pad = int(min([pad, floor(data.shape[1])/2.0]))
+		edge_left = data[:,:pre_pad].mean(axis = 1)
+		edge_right = data[:,-pre_pad:].mean(axis = 1)
+		data = np.concatenate((np.tile(edge_left.reshape(data.shape[0],1),pre_pad),data, np.tile(edge_right.reshape(data.shape[0],1),pre_pad)), axis = 1)
+		data_smooth = sp.signal.convolve2d(data,kernel.reshape(1,kernel.shape[0]),'same')
+		data = data_smooth[:,pad:(data_smooth.shape[1]-pad)]
+
+		return data
+
 
 	def filterEpoch(self,signal, sampl_freq = 512, low_pass = 110, high_pass = 140):
 		'''

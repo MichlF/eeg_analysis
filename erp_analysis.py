@@ -25,8 +25,8 @@ for subject in  ['subject_2','subject_3','subject_4']:
 
 	# CDA data
 	epoch_info = []
-	for session in ['session_1','session_2']:
-		f_name = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg',subject,session,'processed-epo.fif')
+	for session in ['session_1']:
+		f_name = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg',subject,session,'processed_filt_long_3000-epo.fif')
 		epoch_info.append(mne.read_epochs(f_name, add_eeg_ref = False))
 
 	epoch_events = epoch_info[0].event_id
@@ -54,39 +54,52 @@ for subject in  ['subject_2','subject_3','subject_4']:
 		ipsi = np.vstack(ipsi)
 		contra = np.vstack(contra)	
 		
-		# baseline correct(based on -0.4 tot 0; 205 samples) and average over all events and channels		
+		# baseline correct(based on -0.42tot 0; 102 samples) and average over all events and channels		
 		ipsi = ipsi.reshape(ipsi.shape[0]*ipsi.shape[1], ipsi.shape[2])
 		contra = contra.reshape(contra.shape[0]*contra.shape[1], contra.shape[2])
 
-		ipsi_base = (np.array(np.matrix(ipsi) - np.matrix(ipsi[:,:205]).mean(axis = 1))).mean(axis = 0)
-		contra_base = (np.array(np.matrix(contra) - np.matrix(contra[:,:205]).mean(axis = 1))).mean(axis = 0)
+		ipsi_base = (np.array(np.matrix(ipsi) - np.matrix(ipsi[:,:102]).mean(axis = 1))).mean(axis = 0)
+		contra_base = (np.array(np.matrix(contra) - np.matrix(contra[:,:102]).mean(axis = 1))).mean(axis = 0)
 		
 		# filter
-		ipsi_filt = mne.filter.low_pass_filter(ipsi_base, 512, 5)
-		contra_filt = mne.filter.low_pass_filter(contra_base, 512, 5)
+		#ipsi_filt = mne.filter.low_pass_filter(ipsi_base, 512, 5)
+		#contra_filt = mne.filter.low_pass_filter(contra_base, 512, 5)
 
-		all_subjects[condition][subject] = [ipsi_filt, contra_filt] 
+		all_subjects[condition][subject] = [ipsi_base, contra_base] 
 
-		time = ipsi_filt.shape[0]/epoch_info[0].info['sfreq']	* np.arange(ipsi_filt.shape[0],dtype = float)/float(ipsi_filt.shape[0]) - 0.4
+		time = ipsi_base.shape[0]/epoch_info[0].info['sfreq']	* np.arange(ipsi_base.shape[0],dtype = float)/float(ipsi_base.shape[0]) - 0.2
 
 		ax = f.add_subplot(2,2,plot_id + 1)
-		plt.xlim(-0.4,ipsi_filt.shape[0]/epoch_info[0].info['sfreq']-0.4)
-		plt.ylim(-3e-6,3e-6)
+		plt.xlim(-0.2,ipsi_base.shape[0]/epoch_info[0].info['sfreq']-0.2)
+		plt.ylim(-6e-6,6e-6)
 		#plt.xticks(np.arange(left_hemi_left_cue.shape[0]/epoch.info['sfreq']))	
-		plt.plot(time,ipsi_filt,color = 'b', label = 'ipsi')
-		plt.plot(time,contra_filt,color = 'r', label = 'contra')
+		plt.plot(time,ipsi_base,color = 'b', label = 'ipsi')
+		plt.plot(time,contra_base,color = 'r', label = 'contra')
 		plt.axvline(x = 0, color = 'black')	
 		plt.legend(loc='upper right', shadow=True)
 		plt.title(condition)
 
 	plt.savefig(subject + 'erp.pdf')
 
+# grand mean
+data_collapsed_ipsi = np.vstack([all_subjects[condition][subject][0] for condition in all_subjects.keys() for subject in all_subjects[condition].keys()]).mean(axis = 0)
+data_collapsed_contra = np.vstack([all_subjects[condition][subject][1] for condition in all_subjects.keys() for subject in all_subjects[condition].keys()]).mean(axis = 0)
+f = plt.figure(figsize = (20,20))
+plt.ylim(-6e-6,6e-6)
+plt.plot(time,data_collapsed_ipsi,color = 'b', label = 'ipsi')
+plt.plot(time,data_collapsed_contra,color = 'r', label = 'contra')
+plt.axvline(x = 0, color = 'black')	
+plt.axhline(y = 0, color = 'black')	
+plt.legend(loc='upper right', shadow=True)
+plt.title('overall')
+plt.savefig('overall_base_filt.pdf')
+
 
 f = plt.figure(figsize = (20,20))
 for plot_id, condition in enumerate(conditions):
 	ax = f.add_subplot(2,2,plot_id + 1)
 	plt.xlim(-0.4,ipsi_filt.shape[0]/epoch_info[0].info['sfreq']-0.4)
-	plt.ylim(-3e-6,3e-6)
+	plt.ylim(-6e-6,6e-6)
 	ipsi = np.vstack([all_subjects[condition][key][0] for key in all_subjects[condition].keys()]).mean(axis = 0)
 	contra = np.vstack([all_subjects[condition][key][1] for key in all_subjects[condition].keys()]).mean(axis = 0)
 	plt.plot(time,ipsi,color = 'b', label = 'ipsi')
