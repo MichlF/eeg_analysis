@@ -14,7 +14,7 @@ this_raw_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data
 this_project_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg')
 subjects = 4 
 
-combine_sessions = False
+combine_sessions = True
 
 def runWholeSession(ra, Ea,session):
 
@@ -30,19 +30,20 @@ def runWholeSession(ra, Ea,session):
 	
 	# Before rereferencing and filtering, apply semi-automatic rejection of EMG-contaminated epochs
 	#temp_session = ProcessEpochs(session, session.event_list, Ea[0]['event_id_mem'], Ea[1]['timing_mem'][0], Ea[1]['timing_mem'][1], \
-					None, session.subject_id,session.session_id, art_detect = True, trl_pad = 0.5, flt_pad = 0.5, art_pad = 0) 
+	#				None, session.subject_id,session.session_id, art_detect = True, trl_pad = 0.5, flt_pad = 0.5, art_pad = 0) 
 	#temp_session.artifactDetection(z_cutoff = 4, plot = True)
 
 	# Continue preprocessing with raw data
 	session.reReference() 
 	session.filter(l_freq = 0.1, h_freq = None, filter_length = 3000, l_trans_bandwidth = 0.095) 
-	session = ProcessEpochs(session,session.event_list,Ea[0]['event_id_mem'],Ea[1]['timing_mem'][0],Ea[1]['timing_mem'][1],session.subject_id,session.session_id,Ea[1]['timing_mem'][2])
-	#session.dropMarkedEpochs()
-
-	# 
+	session = ProcessEpochs(session, session.event_list, Ea[0]['event_id_mem'], Ea[1]['timing_mem'][0], Ea[1]['timing_mem'][1], \
+					(None, None), session.subject_id,session.session_id, art_detect = False) 
 	#session.detectEyeMovements()
-	#session.correctArtifactICA()
-
+	session.dropMarkedEpochs()
+	
+	# Removing eye-blinks with Independent Component Analysis
+	session.correctArtifactICA()
+	 	
 if __name__ == '__main__':
 
 	try:
@@ -53,7 +54,7 @@ if __name__ == '__main__':
 	for subject_id in range(2,subjects + 1):	
 		EEG_run_array = [
 				{'session' : 1, 'raw_data_path': os.path.join(this_raw_folder,'subject' + str(subject_id) + '_session_1.bdf')},
-				#{'session' : 2, 'raw_data_path': os.path.join(this_raw_folder,'subject' + str(subject_id) + '_session_2.bdf')},
+				{'session' : 2, 'raw_data_path': os.path.join(this_raw_folder,'subject' + str(subject_id) + '_session_2.bdf')},
 						]
 
 		EEG_ERP_array = [
@@ -81,6 +82,5 @@ if __name__ == '__main__':
 		else:			
 			for session in EEG_run_array:						
 				EEG_session = RawBDF(session['raw_data_path'],subject_id,session['session'])
-
 				runWholeSession(EEG_run_array, EEG_ERP_array, EEG_session)	
 
