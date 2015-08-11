@@ -8,6 +8,7 @@ Copyright (c) 2015 DvM. All rights reserved.
 from preprocess_eeg import *
 from IPython import embed as shell
 import os 
+import logging
 
 
 this_raw_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','raw_eeg')
@@ -38,7 +39,7 @@ def runWholeSession(ra, Ea,session):
 	session.filter(l_freq = 0.1, h_freq = None, filter_length = 3000, l_trans_bandwidth = 0.095) 
 	session = ProcessEpochs(session, session.event_list, Ea[0]['event_id_mem'], Ea[1]['timing_mem'][0], Ea[1]['timing_mem'][1], \
 					(None, None), session.subject_id,session.session_id, art_detect = False) 
-	#session.detectEyeMovements()
+	session.detectEyeMovements()
 	session.dropMarkedEpochs()
 	
 	# Removing eye-blinks with Independent Component Analysis
@@ -46,12 +47,15 @@ def runWholeSession(ra, Ea,session):
 	 	
 if __name__ == '__main__':
 
+	logging.basicConfig(filename = os.path.join(this_project_folder,'log'), level = logging.INFO, format = '%(asctime)s %(message)s')
+
 	try:
 		os.mkdir(this_project_folder)
 	except OSError:
 		pass
 
 	for subject_id in range(2,subjects + 1):	
+		logging.info('Started analysis of subject %s', str(subject_id))
 		EEG_run_array = [
 				{'session' : 1, 'raw_data_path': os.path.join(this_raw_folder,'subject' + str(subject_id) + '_session_1.bdf')},
 				{'session' : 2, 'raw_data_path': os.path.join(this_raw_folder,'subject' + str(subject_id) + '_session_2.bdf')},
