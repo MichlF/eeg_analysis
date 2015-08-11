@@ -8,11 +8,12 @@ Copyright (c) 2015 DvM. All rights reserved.
 from preprocess_eeg import *
 from IPython import embed as shell
 import os 
+import logging
 
 
 this_raw_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','raw_eeg')
 this_project_folder = os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg')
-subjects = 12
+subjects = 4 
 
 combine_sessions = True
 
@@ -22,25 +23,31 @@ def runWholeSession(ra, Ea,session):
 	#PREPROCESSING
 	session.dropEmptyChannels()
 	session.renameChannel()
-	session.changeEventCodes(event_1 = [100,109,110,119,200,209,210,219],
+	session.changeEventCodes(event_1 = [100,109,110,119,200,209,210,219], # ADJUST FUNCTION PER EXPERIMENT
 							event_2	= [101,102,103,104,105,106,107,108,
 										111,112,113,114,115,116,117,118,
 										201,202,203,204,205,206,207,208,
 										211,212,213,214,215,216,217,218])
 	
+	# Before rereferencing and filtering, apply semi-automatic rejection of EMG-contaminated epochs
+	#temp_session = ProcessEpochs(session, session.event_list, Ea[0]['event_id_mem'], Ea[1]['timing_mem'][0], Ea[1]['timing_mem'][1], \
+	#				None, session.subject_id,session.session_id, art_detect = True, trl_pad = 0.5, flt_pad = 0.5, art_pad = 0) 
+	#temp_session.artifactDetection(z_cutoff = 4, plot = True)
+
+	# Continue preprocessing with raw data
 	session.reReference() 
-	session.filter(l_freq = 0.1, h_freq = None, filter_length = None, method = 'iir', iir_params = dict(order=4, ftype='butter')) 
-
-	session = ProcessEpochs(session,session.event_list,Ea[0]['event_id_mem'],Ea[1]['timing_mem'][0],Ea[1]['timing_mem'][1],session.subject_id,session.session_id,None)
-	### INSERT BASELINE CORRECTION HERE ????????????
-	### ARTIFACT DETECTION ON RAW OR FILTERED DATA
-
+	session.filter(l_freq = 0.1, h_freq = None, filter_length = 3000, l_trans_bandwidth = 0.095) 
+	session = ProcessEpochs(session, session.event_list, Ea[0]['event_id_mem'], Ea[1]['timing_mem'][0], Ea[1]['timing_mem'][1], \
+					(None, None), session.subject_id,session.session_id, art_detect = False) 
 	session.detectEyeMovements()
-	session.artifactDetection(z_cutoff = 4, plot = True) # CHECK METHOD TO SPECIFY Z VALUE
 	session.dropMarkedEpochs()
+	
+	# Removing eye-blinks with Independent Component Analysis
 	session.correctArtifactICA()
-
+	 	
 if __name__ == '__main__':
+
+	logging.basicConfig(filename = os.path.join(this_project_folder,'log'), level = logging.INFO, format = '%(asctime)s %(message)s')
 
 	try:
 		os.mkdir(this_project_folder)
@@ -48,6 +55,7 @@ if __name__ == '__main__':
 		pass
 
 	for subject_id in range(2,subjects + 1):	
+		logging.info('Started analysis of subject %s', str(subject_id))
 		EEG_run_array = [
 				{'session' : 1, 'raw_data_path': os.path.join(this_raw_folder,'subject' + str(subject_id) + '_session_1.bdf')},
 				{'session' : 2, 'raw_data_path': os.path.join(this_raw_folder,'subject' + str(subject_id) + '_session_2.bdf')},
@@ -59,7 +67,8 @@ if __name__ == '__main__':
 								'1_neutral_left_dual': 1110,'1_neutral_right_dual': 1119,'2_match_left_dual': 1200,'2_match_right_dual': 1209,'2_neutral_left_dual': 1210,
 								'2_neutral_right_dual': 1219}, },
 
-				{'timing_mem':[-0.2,1.2,None]},			
+				{'timing_mem':[-0.2,1.2,(None,None)]},
+
 
 
 				{'event_id_search': {'1_match_up_left': 101,'1_match_up_right': 102,'1_match_down_left': 103,'1_match_down_right': 104,'1_match_left_up': 105,'1_match_left_down': 106,
@@ -77,6 +86,5 @@ if __name__ == '__main__':
 		else:			
 			for session in EEG_run_array:						
 				EEG_session = RawBDF(session['raw_data_path'],subject_id,session['session'])
-
 				runWholeSession(EEG_run_array, EEG_ERP_array, EEG_session)	
 

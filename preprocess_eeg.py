@@ -10,6 +10,7 @@ import os
 import numpy as np
 import scipy as sp
 import logging
+import matplotlib
 import matplotlib.pyplot as plt
 import math
 import seaborn as sns
@@ -18,6 +19,7 @@ import itertools
 from matplotlib.collections import LineCollection
 from mne.preprocessing.peak_finder import peak_finder
 from IPython import embed as shell
+from math import ceil, floor
 
 
 class RawBDF(mne.io.edf.edf.RawEDF):
@@ -25,13 +27,13 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 	Child originating from MNE built-in RawEDF, such that new methods can be added to this built in class
 	'''
 
-	def __init__(self,input_fname, subject_id, session_id, stim_channel  = -1, annot = None, annotmap = None, tal_channel = None, \
+	def __init__(self,input_fname,subject_id, session_id, montage = None, stim_channel  = -1, annot = None, annotmap = None, tal_channel = None, \
 			hpts = None, preload = True, verbose = None):
 		self.subject_id = subject_id
 		self.session_id = session_id
-		super(RawBDF,self).__init__(input_fname, stim_channel  = stim_channel, annot = annot, annotmap = annotmap, tal_channel = tal_channel,\
-		 	hpts = hpts, preload = preload, verbose = verbose)
-		#logging.info('rawBDF instance was created for subject {0}'.format(input_fname[-8:]))
+		super(RawBDF,self).__init__(input_fname, montage = montage, stim_channel  = stim_channel, annot = annot, annotmap = annotmap, tal_channel = tal_channel,\
+		 	preload = preload, verbose = verbose)
+		logging.info('rawBDF instance was created for subject %s', str(subject_id))
 
 
 	def dropEmptyChannels(self, channels_to_remove = ['C','D']):
@@ -52,6 +54,7 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 		for channel in channels_to_remove:
 			drop_channels += [channel + str(i) for i in range(1,33)]
 		
+		logging.info('The following channels were dropped:  %s', str([ch for ch in drop_channels if ch in self.info['ch_names']]))
 		self.drop_channels(drop_channels)
 
 	def renameChannel(self):
@@ -85,7 +88,9 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 
 		for ch_ind, channel in enumerate(channels):
 			self.ch_names[self.ch_names.index(channel)] = new_channels[ch_ind]
-			self.info['chs'][self.ch_names.index(new_channels[ch_ind])]['ch_name'] = new_channels[ch_ind]		
+			self.info['chs'][self.ch_names.index(new_channels[ch_ind])]['ch_name'] = new_channels[ch_ind]	
+
+		logging.info('Channels renamed to 10-20 system')	
 
 	def reReference(self, ref_chans=['EXG5','EXG6'], vEOG = ['VEOG1','VEOG2','EOGBl'], hEOG = ['HEOG1','HEOG2','EOGEye']):
 		'''
@@ -104,7 +109,7 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 		'''
 
 		# rereference all channels (EEG and EOG) to reference channels 
-		logging.info('Data was rereferenced to channels ' + ', '.join(ref_chans))
+		logging.info('Data was rereferenced to channels %s', str(ref_chans))
 		(self, ref_data) = mne.io.set_eeg_reference(self, ref_chans, copy=False)
         
 		# rerefence EOG data (vertical and horizontal)
@@ -114,8 +119,10 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 		self[v_id[2]][0][0] = self[v_id[0]][0] - self[v_id[1]][0]
 		self[h_id[2]][0][0] = self[h_id[0]][0] - self[h_id[1]][0]
 
+		shell()
 		# drop ref chans
 		self.drop_channels(ref_chans)
+		logging.info('Reference channels removed')
 
 	def changeEventCodes(self, event_1 = [], event_2 = [], stim_channel = 'STI 014'):
 		'''
@@ -133,12 +140,11 @@ class RawBDF(mne.io.edf.edf.RawEDF):
 		self.event_list (data): Adds event_list to RawBDF object
 		'''
 
-		events = mne.find_events(self, stim_channel = stim_channel)
-
+		events = mne.find_events(self, stim_channel = stim_channel, consecutive = False) 
+		# ADD UPDATE INCLUDE EVENT COUNT CHECK IN BEHAVIORAL LOG FILE
 		for event_id, event in enumerate(events[:,2]):
 			if (event in event_1) and events[event_id + 1, 2] in event_2:
-				events[event_id,2] += 1000
-
+				events[event_id,2] += 1000		
 		self.event_list = events
 
 
@@ -147,14 +153,21 @@ class ProcessEpochs(mne.Epochs):
 	Child originating from MNE built-in Epochs, such that new methods can be added to this built in class
 	'''
 
-	def __init__(self, raw_object, events, event_id, tmin, tmax, subject_id, session_id, baseline, picks = None, preload = True, \
-		decim = 1, on_missing = 'error', verbose = None, filter_padding = 0.2):
+	def __init__(self, raw_object, events, event_id, tmin, tmax, baseline, subject_id, session_id, art_detect = False, trl_pad = 0, flt_pad = 0.5, art_pad = 0, box_car = 0.2, picks = None, preload = True, \
+		decim = 1, on_missing = 'error', verbose = None, proj = False):
 		self.subject_id = subject_id
 		self.session_id = session_id
+		self.art_detect = art_detect
+		self.flt_pad = flt_pad
+		self.art_pad = art_pad
+		self.trl_pad = trl_pad
+		self.box_car = box_car
 		self.epoch_len = tmax - tmin
-		self.filter_padding = filter_padding
-		super(ProcessEpochs,self).__init__(raw_object, events, event_id, tmin = tmin - filter_padding, tmax = tmax + filter_padding, baseline = baseline,\
-			picks = picks, preload = preload, decim = decim, on_missing = on_missing, verbose = verbose)
+		if art_detect:
+			tmin -= (trl_pad + flt_pad)
+			tmax += (trl_pad + flt_pad)
+		super(ProcessEpochs,self).__init__(raw_object, events, event_id, tmin = tmin, tmax = tmax, baseline = baseline,\
+			picks = picks, preload = preload, decim = decim, on_missing = on_missing, verbose = verbose, proj = proj)
 		#logging.info
 
 	def baselineEpoch(self, channel_id = 'all', epoch_id = None, baseline_period = False, baseline = (0,200)):
@@ -178,7 +191,9 @@ class ProcessEpochs(mne.Epochs):
 		'''
 
 		if channel_id == 'all':
-			channel_id = range(64)	
+			channel_id = range(64)
+		elif isinstance(channel_id, list) and isinstance(channel_id[0], str):
+			channel_id = [self.info['ch_names'].index(ch) for ch in channel_id]	
 
 		if epoch_id == None:
 			data = np.hstack([self[epoch].get_data()[0,channel_id,:] for epoch in range(len(self))])	
@@ -230,94 +245,108 @@ class ProcessEpochs(mne.Epochs):
 		self.marked_epochs (data): Adds a list of marked epochs to Epoch object
 		'''
 
-		# select data and apply basline correction per epoch
-		data = self.baselineEpoch()
-
-		# step 1: Filter data 
-		#data = mne.filter.band_pass_filter(data, self.info['sfreq'], band_pass[0], band_pass[1], filter_length = None) # CHECK EFFECT OF FILTER LENGTH
-		data = self.filterEpoch(data, self.info['sfreq'],low_pass = band_pass[0], high_pass = band_pass[1])
+		epoch_data = []
 		
-		# correct for filter padding (select Epoch data only)
-		l_pad, l_epoch = (data.shape[1]/len(self), int(self.epoch_len*self.info['sfreq']))
-		start_epoch = (l_pad - l_epoch)/2
-		id_epoch = np.zeros(l_pad, dtype = bool)
-		id_epoch[start_epoch: start_epoch + l_epoch] = True
-		id_epoch_all = np.tile(id_epoch, len(self))
-		data = data[:,id_epoch_all] 
+		for ep in range(len(self)):
 
-		# step 2: Z-transform data
-		data_amp = np.abs(sp.signal.hilbert(data))
-		z_data = (data_amp - data_amp.mean())/data_amp.std()
-		z_data_norm = z_data.sum(axis = 0)/math.sqrt(nr_channels)
-		z_threshold = np.median(z_data_norm) + abs(z_data_norm.min()- np.median(z_data_norm)) + z_cutoff # CHECK WITH JORAM!!!!
-
-		# step 3 threshold z-score per epoch
-		self.info.update({'marked_epochs':[]})
-
-		for epoch in range(len(self)):	# loop over all epochs
-			# select channel that contributes most to thresholded z value
-			z_id = np.zeros(z_data_norm.size, dtype = bool)
-			start = epoch*l_epoch
-			z_id[start:start + l_epoch] = True
-			epoch_data = z_data[:, z_id]
-			ch_id = np.where(epoch_data == epoch_data.max())[0][0]
+		# STEP 1: select data and filter data
+			data = self[ep].get_data()[0,range(nr_channels),:]
 			
-			if z_data_norm[z_id].max() >= z_threshold:
+			if ep == 0:
+				id_epoch = np.ones(data.shape[1], dtype = bool)
+				id_epoch[:int((self.flt_pad*self.info['sfreq']))] = False
+				id_epoch[int((-self.flt_pad*self.info['sfreq'])):] = False
 
-				self.info['marked_epochs'].append(epoch)	
+			data = mne.filter.band_pass_filter(data, self.info['sfreq'],band_pass[0], band_pass[1], method = 'iir', iir_params = dict(order=9, ftype='butter')) # CHECK FILTER DIRECTION, compare to FIELDTRIP SETTINGS		
+			data = np.abs(sp.signal.hilbert(data)) 
+			
+			# box_car smoothing
+			data = self.boxSmoothing(data)
+
+			# remove filter padding
+			data = data[:,id_epoch]
+			epoch_data.append(data)
+
+		# STEP 2: Z-transform data
+		epoch_comb = np.hstack(epoch_data)
+		avg_data = epoch_comb.mean(axis = 1).reshape(-1,1)
+		std_data = epoch_comb.std(axis = 1).reshape(-1,1)
+		z_data = [(epoch - avg_data)/std_data  for epoch in epoch_data] 
+		
+		# STEP 3 threshold z-score per epoch
+		z_accumel = np.hstack(z_data).sum(axis = 0)/math.sqrt(nr_channels)
+		z_accumel_ep = [np.array(z.sum(axis = 0)/math.sqrt(nr_channels)) for z in z_data]
+		z_thresh = np.median(z_accumel) + abs(z_accumel.min() - np.median(z_accumel)) + z_cutoff
+
+		# Loop over all epochs to plot results
+		bad_epoch = []
+
+		for ep in range(len(self)):
+
+			ch_id = np.where(z_data[ep] == z_data[ep].max())[0][0]
+
+			# check if epoch contains artifact
+			if (z_accumel_ep[ep] > z_thresh).sum() > 0:
+				bad_epoch.append(ep)
 
 				if plot:
+					data_2_plot = self[ep].get_data()[0][ch_id,id_epoch]
+					z_2_plot = z_accumel_ep[ep]	
+					if ep == 0:
+						id_trial = np.ones(data_2_plot.size, dtype = bool)
+						id_trial[:int((self.trl_pad*self.info['sfreq']))] = False
+						id_trial[int((-self.trl_pad*self.info['sfreq'])):] = False
 
-					data_2_plot = self.baselineEpoch(channel_id = ch_id, epoch_id = epoch, baseline_period = False)[id_epoch]
-					z_2_plot = z_data_norm[z_id]
-				
-					f=plt.figure(figsize = (40,40))
+					plt.figure(figsize = (40,20))
 					with sns.axes_style('dark'):
+						
+						matplotlib.rcParams.update({'font.size':70})
 
-						ax = f.add_subplot(2,2,1)
-						plt.plot(np.arange(0,z_data_norm.size),z_data_norm,color = 'b')
-						plt.plot([0,z_data_norm.size],[z_threshold,z_threshold], 'r--')
-						plt.fill_between(np.arange(epoch*l_epoch,epoch*l_epoch + l_epoch-1),-50,150, color = 'purple', alpha = 0.5)
-						plt.ylabel('zscore')
-						plt.xlabel('samples')
-						plt.xlim(0,z_data_norm.size)
-						plt.ylim(-50,200)
+						ax = plt.subplot(121, xlabel = 'samples', ylabel = 'z_value', xlim = (0,z_accumel.size), ylim = (-20,40))
+						plt.plot(np.arange(0,z_accumel.size),z_accumel,color = 'b')
+						plt.plot(np.arange(0,z_accumel.size)[ep*id_trial.size:ep*id_trial.size + id_trial.size],z_2_plot,color = 'r')
+						plt.plot(np.arange(0,z_accumel.size),np.ma.masked_less(z_accumel, z_thresh),color = 'r')
+						ax.axhline(z_thresh, color = 'r', ls = '--')
 
-						ax = f.add_subplot(4,2,2)	
-						plt.plot(np.arange(0,data_2_plot.size),data_2_plot,color = 'b')	
-						plt.title('Epoch' + str(epoch) + ', channel ' + self.ch_names[ch_id])
-						plt.ylabel('EEG signal (V)')
-						plt.xlabel('samples')
-						plt.xlim(0,data_2_plot.size)
-				
-						ax = f.add_subplot(4,2,4)	
-						plt.plot(np.arange(0,z_2_plot.size),z_2_plot,color = 'b')
-						plt.plot([0,z_2_plot.size],[z_threshold,z_threshold], 'r--')
-						plt.ylabel('zscore')
-						plt.xlabel('samples')	
-						plt.xlim(0,z_2_plot.size)
-		
-						ax = f.add_subplot(212)
-						if epoch == 0:
-							data = np.hstack(self[epoch:epoch + 2].get_data()).T[:,:nr_channels]
-							x_epoch = np.zeros(data.shape[0],dtype = bool)
-							x_epoch[int(self.filter_padding*self.info['sfreq']): int(self.filter_padding*self.info['sfreq']+ self.epoch_len*self.info['sfreq'])] = True
-							x_min, x_max = (self.filter_padding, self.filter_padding + self.epoch_len)
-						else:
-							if epoch == self.events.shape[0] - 1:
-								data = np.hstack(self[epoch - 2:epoch + 1].get_data()).T[:,:nr_channels]
-							else:
-								data = np.hstack(self[epoch - 1:epoch + 2].get_data()).T[:,:nr_channels]
+						start, end = (self.tmin + self.flt_pad, self.tmax - self.flt_pad)
 
-							x_epoch = np.zeros(data.shape[0],dtype = bool)
-							x_epoch[int((3*self.filter_padding + self.epoch_len)*self.info['sfreq']):int((3*self.filter_padding + self.epoch_len)*self.info['sfreq'] + self.epoch_len*self.info['sfreq'])] = True				
-							x_min, x_max = (3*self.filter_padding+self.epoch_len, 3*self.filter_padding+ 2*self.epoch_len)
+						ax = plt.subplot(222, xlabel = 'Time (s)', ylabel = 'EEG signal (V)', title = 'Epoch ' + str(ep) + ', channel ' + self.ch_names[ch_id], xlim = (start,end))
+						plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size),data_2_plot,color = '#95B8BA')	
+						plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size)[id_trial],data_2_plot[id_trial],color = 'b')	
 
-						self.plotEEG(data,ax,fill = True, x_min = x_min, x_max = x_max)
+						ax = plt.subplot(224, xlabel = 'Time (s)', ylabel = 'z_value', xlim = (start,end), ylim = (-20,40))
+						plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size),z_2_plot,color = '#95B8BA')
+						plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size)[id_trial],z_2_plot[id_trial],color = 'b')
+						plt.plot(np.arange(start,end,abs(start-end)/data_2_plot.size),np.ma.masked_less(z_2_plot, z_thresh),color = 'r')
+						ax.axhline(z_thresh, color = 'r', ls = '--')	
 
 					plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
-						'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','epoch_' + str(epoch) + '.pdf'))
-					plt.close()	
+					'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','epoch_' + str(ep) + '.pdf'))
+					plt.close()			
+
+		np.savetxt(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
+				'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','marked_epochs.txt'), \
+				np.array(bad_epoch, dtype = int), fmt = '%u')	
+
+	def boxSmoothing(self, data):
+		'''
+		doc string boxSmoothing
+		'''
+
+		pad = int(round(self.box_car*self.info['sfreq']))
+		if pad % 2 == 0:
+			# the kernel should have an odd number of samples
+			pad += 1
+			kernel = np.ones(pad)/pad
+		pad = int(ceil(pad/2))
+		pre_pad = int(min([pad, floor(data.shape[1])/2.0]))
+		edge_left = data[:,:pre_pad].mean(axis = 1)
+		edge_right = data[:,-pre_pad:].mean(axis = 1)
+		data = np.concatenate((np.tile(edge_left.reshape(data.shape[0],1),pre_pad),data, np.tile(edge_right.reshape(data.shape[0],1),pre_pad)), axis = 1)
+		data_smooth = sp.signal.convolve2d(data,kernel.reshape(1,kernel.shape[0]),'same')
+		data = data_smooth[:,pad:(data_smooth.shape[1]-pad)]
+
+		return data
 
 	def filterEpoch(self,signal, sampl_freq = 512, low_pass = 110, high_pass = 140):
 		'''
@@ -327,7 +356,7 @@ class ProcessEpochs(mne.Epochs):
 		b, a = sp.signal.butter(3,[low_pass/2.0/sampl_freq, high_pass/2.0/sampl_freq], btype = 'band')
 		return sp.signal.filtfilt(b,a,signal)
 
-	def dropMarkedEpochs(self, epochs = ['marked_epochs', 'eye_epochs']):
+	def dropMarkedEpochs(self):
 		'''
 		Drop epochs as marked by the noise detection (artifactDetection and detectEyeMovements) functions. Uses MNE built in drop_epochs function.
 		For extra info see doc string of mne.drop_epochs
@@ -335,7 +364,6 @@ class ProcessEpochs(mne.Epochs):
 		Arguments
 		- - - - -
 		self(object): Epochs object 
-		epochs (list of strings): List of epochs to drop as added by noise detection functions
 
 		Returns
 		- - - -
@@ -343,87 +371,69 @@ class ProcessEpochs(mne.Epochs):
 		self(object): Epochs object without marked epochs
 		'''	
 
-		drop_epochs = sorted(list(set([i for i in itertools.chain.from_iterable([self.info[ep] for ep in epochs])])))
+		drop_epochs = np.loadtxt(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
+			'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','marked_epochs.txt'),dtype = int)
 		self.drop_epochs(drop_epochs, reason = 'User marked')
 
 
-	def correctArtifactICA(self, n_components = 50, nr_electrodes = 64, EOG = ['VEOG1','VEOG2'], max_comp = 1):
+	def correctArtifactICA(self, n_components = 50, nr_channels = 64, EOG = ['VEOG1','VEOG2'], max_comp = 1):
 		'''
 		docstring: CHECK WHETHER HEOG NEEDS TO BE INCLUDED!!!!!!!
 		'''
 
+		# Before running ica, select pre-ica eeg to visualize ica effect 
 		eog_events = self.detectBlinks()
-		
-		# select eeg data (1 sec) around blink events 
-		all_data = np.hstack([self[epoch].get_data()[0,:nr_electrodes,:] for epoch in range(len(self))]) 
-		blinks_eeg =np.array([all_data[:,id -self.info['sfreq']/2.0:id+self.info['sfreq']/2.0] for id in eog_events])
+		all_data = np.hstack([self[ep].get_data()[0,:nr_channels,:] for ep in range(len(self))]) 
+		blinks_eeg =np.array([all_data[:,eog_id -self.info['sfreq']/2.0:eog_id+self.info['sfreq']/2.0] for eog_id in eog_events])
 
 		# initiate ICA
-		layout = mne.layouts.read_layout(os.path.join('/Users','Dirk','Dropbox','eeg_analysis','subject_layout_64_std.lout'))
-		ica = mne.preprocessing.ICA(n_components = n_components)
-		ica.fit(self, picks = range(nr_electrodes), decim = 3)
+		layout = mne.channels.read_layout('subject_layout_64_std.lout',os.path.join('/Users','Dirk','Dropbox','eeg_analysis'))
+		ica = mne.preprocessing.ICA(n_components = n_components, method = 'extended-infomax').fit(self, picks = range(nr_channels))
+		
+		# plot ICA components (at the moment only first 20 comps are plotted)
+		ica.plot_components(range(20), colorbar = True, layout = layout, ch_type = 'eeg', show = False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
+		'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'ica','eog_components.pdf'))
+		plt.close()
 
 		# select components to remove
-		for eog_ch in EOG:
+		for i, eog_ch in enumerate(EOG):
 			# detect EOG by correlation
-			eog_index, scores = ica.find_bads_eog(self, eog_ch)
+			eog_id, scores = ica.find_bads_eog(self, eog_ch)
+			ica.exclude += eog_id[:max_comp]
+			#logging.info('Component {0} excluded with score of {1}'.format(eog_id[:max_comp],scores[eog_id][:max_comp]))
 
-			ica.plot_scores(scores, exclude = eog_index, show = False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
+			# plot scores and components
+			ica.plot_scores(scores, exclude = eog_id, show = False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
 				'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs','ica', 'scores_' + eog_ch + '.pdf'))
 			plt.close()
-
-			show_picks = np.abs(scores).argsort()[::-1][:5]
-			
-			ica.plot_sources(self,show_picks, exclude = eog_index, title = 'Sources related to EOG artifacts (red)', show= False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
+			ica.plot_sources(self,np.abs(scores).argsort()[::-1][:5], exclude = eog_id, title = 'Sources related to EOG artifacts (red)', show= False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
 				'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs','ica', 'sources_' + eog_ch + '.pdf'))
 			plt.close()
 
-			if eog_index != []: 
-				ica.plot_components(eog_index[: max_comp], colorbar = True, layout = layout, ch_type = 'eeg', show = False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
-				'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'ica','eog_comp_' + eog_ch + '.pdf'))
-			else:
-				ica.plot_components(show_picks[0], colorbar = True, layout = layout, ch_type = 'eeg', show = False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
-				'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'ica','eog_comp_empty' + eog_ch + '.pdf'))	
-			plt.close()	
-				
-			ica.exclude += eog_index[:max_comp]
-			logging.info('Component {0} excluded with score of {1}'.format(eog_index[:max_comp],scores[eog_index][:max_comp]))
-
+			if eog_id != []: 
+				ica.plot_components(eog_id[: max_comp], colorbar = True, layout = layout, ch_type = 'eeg', show = False).savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data',\
+			'load_accessory','processed_eeg','subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'ica','eog_comp_' + eog_ch + '.pdf'))
+				plt.close()
 		# remove selected components
-		self = ica.apply(self)  
-	
-		# select eeg data (1 sec) around blink events (after ica)
-		all_data = np.hstack([self[epoch].get_data()[0,:nr_electrodes,:] for epoch in range(len(self))]) 
-		blinks_eeg_ica =np.array([all_data[:,id -self.info['sfreq']/2.0:id+self.info['sfreq']/2.0] for id in eog_events])
+		self = ica.apply(self)  		
+
+		# After running ica, select post-ica eeg to visualize ica effect 
+		all_data = np.hstack([self[epoch].get_data()[0,:nr_channels,:] for epoch in range(len(self))]) 
+		blinks_eeg_ica =np.array([all_data[:,eog_id -self.info['sfreq']/2.0:eog_id+self.info['sfreq']/2.0] for eog_id in eog_events])
 
 		# plot ICA effect
-		for blink_id in range(blinks_eeg_ica.shape[0] + 1):
-			f=plt.figure(figsize = (40,40))
-					
-			with sns.axes_style('dark'):
-
-				if blink_id == 0:
-					data = blinks_eeg.mean(axis = 0).T
-					data_ica = blinks_eeg_ica.mean(axis = 0).T
-					epoch = 'mean_epoch'
-				else:
-					data = blinks_eeg[blink_id-1].T
-					data_ica = blinks_eeg_ica[blink_id-1].T
-					epoch = 'epoch_' + str(blink_id -1)
-
-				ax = f.add_subplot(211)	
-				self.plotEEG(data,ax)
-				ax = f.add_subplot(212)	
-				self.plotEEG(data_ica,ax)
-		
-			plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg',\
-					'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs','ica', 'ica_effect' + epoch + '.pdf'))
-			plt.close()
+		f=plt.figure(figsize = (30,30))
+		ax = f.add_subplot(111)
+		data_2_plot = [blinks_eeg.mean(axis = 0).T, blinks_eeg_ica.mean(axis = 0).T]
+		self.plotEEG(data_2_plot,ax)
+		plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg',\
+			'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs','ica', 'ica_effect.pdf'))
+		plt.close()
 
 		# crop epochs to control for filter padding and save epoched data
 		#self.crop(self.tmin + self.filter_padding, self.tmax - self.filter_padding)		
-		self.save(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','subject_' + str(self.subject_id), \
-		'session_' + str(self.session_id), 'processed-epo.fif'))
+		#self.save(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg','subject_' + str(self.subject_id), \
+		#'session_' + str(self.session_id), 'processed-epo.fif'))
 
 
 	def plotEEG(self,data, ax, plt_range = 1e-4, nr_channels = 64, fill = False, x_min = None, x_max = None):
@@ -431,60 +441,97 @@ class ProcessEpochs(mne.Epochs):
 		docstring
 		'''
 
-		time = data.shape[0]/self.info['sfreq']	* np.arange(data.shape[0],dtype = float)/float(data.shape[0])
-		plt.xlim(0,data.shape[0]/self.info['sfreq'])
-		plt.xticks(np.arange(data.shape[0]/self.info['sfreq']))	
+		for i, dat in enumerate(data):
+			time = dat.shape[0]/self.info['sfreq']	* np.arange(dat.shape[0],dtype = float)/float(dat.shape[0])
+			if i == 0:
+				plt.xlim(0,dat.shape[0]/self.info['sfreq'])
+				plt.xticks(np.arange(dat.shape[0]/self.info['sfreq']))	
+				plt.xlabel('Time (s) ')
 		
-		dr = (plt_range)*0.35
-		y_min, y_max = -plt_range, (data.shape[1] - 1) * dr + plt_range
-		plt.ylim(y_min,y_max)
+				dr = (plt_range)*0.35
+				y_min, y_max = -plt_range, (dat.shape[1] - 1) * dr + plt_range
+				plt.ylim(y_min,y_max)
 
-		segs = []
-		ticklocs = []
-		for ch in range(nr_channels):
-			segs.append(np.hstack((time[:,np.newaxis], data[:,ch,np.newaxis])))
-			ticklocs.append(ch*dr)
+			segs = []
+			ticklocs = []
+			for ch in range(nr_channels):
+				segs.append(np.hstack((time[:,np.newaxis], dat[:,ch,np.newaxis])))
+				ticklocs.append(ch*dr)
 
-		offsets = np.zeros((nr_channels,2), dtype = float)
-		offsets[:,1] = ticklocs
+			offsets = np.zeros((nr_channels,2), dtype = float)
+			offsets[:,1] = ticklocs
 
-		lines = LineCollection(segs, offsets = offsets, transOffset = None)
+			lines = LineCollection(segs, offsets = offsets, transOffset = None, color = ['r','g'][i])
 
-		ax.add_collection(lines)
-		ax.set_yticks(ticklocs)
-		ax.set_yticklabels(self.info['ch_names'][:nr_channels])
-		plt.xlabel('Time (s) ')
-		plt.ylabel('Electrode channels')
-		if fill:
-			plt.fill_between(time[np.where(np.logical_and(time>=x_min, time<=x_max))[0]],y_min, y_max,color = 'red', alpha = 0.1)
+			ax.add_collection(lines)
+			if i == 0:
+				ax.set_yticks(ticklocs)
+				ax.set_yticklabels(self.info['ch_names'][:nr_channels])
+				
+				plt.ylabel('Electrode channels')
+				if fill:
+					plt.fill_between(time[np.where(np.logical_and(time>=x_min, time<=x_max))[0]],y_min, y_max,color = 'red', alpha = 0.1)
 
-	def detectEyeMovements(self, channels = ['HEOG1','HEOG2'], threshold = 1e-4, window = 0.1, step = 0.05):
+	def detectEyeMovements(self, channels = ['EOGEye'], threshold = 25e-6, t_window = [-0.1,1], window = 0.1, step = 0.05, plot = True):
 		'''
 		Detect eye movements by marking step like activity that is greater than a given threshold. Based on pop_artstep.m from the ERPLAB Tolbox. 
+		
+		Arguments
+		- - - - -
+		self(object): Epochs object 
+		channels (list): Channels used to detect eye movements
+		threshold (int): Threshold set to check whether voltage shift is specified as an eye movement
+		t_window (list): Time window in seconds used to scan for eye movements
+		window (float): Window in seconds used to calculate average activity
+		step (float): Step size (sliding window approach) 
+		plot (bool): If True, plots epoch data (EOG Channel) of detected blink
+
+		Returns
+		- - - -
+		
+		eye_epochs (data): Saves list of epochs containing eye movements
 		'''
 
-		ch_index = np.array([self.info['ch_names'].index(ch) for ch in channels])
-		data = [self[epoch].get_data()[0,ch_index,:] for epoch in range(len(self))]
+		if self.tmin > t_window[0] or self.tmax < t_window[1]:
+			raise ValueError('Selected time points not within epoch selection')
 
-		# create sliding window (adjust for samplig frequency)
-		window = int(self.info['sfreq']/(1/window))
-		step = int(self.info['sfreq']/(1/step))
+		ch_id = np.array([self.info['ch_names'].index(ch) for ch in channels])
+		data = [self[ep].get_data()[0,ch_id,:] for ep in range(len(self))]
 
-		sl_window = [(i,i + window) for i in range(0,data[0].shape[1] - window, step)]
-		if sl_window[-1][-1] < data[0].shape[1] - 1:
-			sl_window.append((sl_window[-1][0] + 50, data[0].shape[1] - 1))
+		# create sliding window (adjust for sampling frequency)
+		window = int(self.info['sfreq']/(1.0/window))
+		step = int(self.info['sfreq']/(1.0/step))
+		start_id, end_id = int(self.info['sfreq']/(1.0/abs(self.tmin - t_window[0]))), int(self.info['sfreq']/(1.0/abs(self.tmin - t_window[1])))
 
-		# per epoch apply sliding window 	
-		self.info.update({'eye_epochs':[]})
-		for index, ep_data in enumerate(data):
-			for i in range(len(sl_window) - 1):
-				amp_1 = [np.mean(ep_data[ch,sl_window[i][0]:sl_window[i][1]]) for ch in range(len(channels))]
-				amp_2 = [np.mean(ep_data[ch,sl_window[i+1][0]:sl_window[i+1][1]]) for ch in range(len(channels))]
-				test = abs(np.array(amp_1) -np.array(amp_2)) > threshold
-				if  sum(test) != 0:
-					self.info['eye_epochs'].append(index)
-					break		
+		sl_wind = [[i, i + window] for i in range(start_id, end_id, step)]	
+		if sl_wind[-1][1] > end_id:
+			sl_wind[-1][1] = end_id
 
+		# per epoch apply sliding window 	#CHECK INDEXING OF IND in DATA.SIZE
+		eye_epoch = []	
+		for ind, ep_data in enumerate(data):
+			for i in range(len(sl_wind) - 1):
+				act_1 = ep_data.squeeze()[sl_wind[i][0]:sl_wind[i][1]].mean()
+				act_2 = ep_data.squeeze()[sl_wind[i + 1][0]:sl_wind[i + 1][1]].mean()
+				if abs(act_1 - act_2) > threshold:
+					eye_epoch.append(ind)
+					if plot:
+						#data_2_plot = self.baselineEpoch(channel_id = ch_id, epoch_id = ind).squeeze()
+						data_2_plot = ep_data	
+						plt.xlabel('Time(s)')
+						plt.ylabel('EOG signal (V')
+						#plt.ylim(-threshold*2, threshold*2)	
+						plt.plot(np.arange(self.tmin,self.tmax,abs(self.tmin-self.tmax)/data[ind].size),data_2_plot,color = '#95B8BA')
+						plt.plot(np.arange(self.tmin,self.tmax,abs(self.tmin-self.tmax)/data[ind].size)[start_id:end_id],data_2_plot[start_id:end_id],color = 'b')
+						plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
+						'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','eye_epoch_' + str(ind) + '.pdf'))
+						plt.close()
+					break	
+
+		np.savetxt(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
+			'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs', 'marked_epochs','eye_epochs.txt'), \
+			np.array(eye_epoch, dtype = int), fmt = '%u')			
+	
 	def detectBlinks(self,band_pass = [1,10], ch_name = ['VEOG1','VEOG2']):
 		'''
 		docstring
@@ -492,7 +539,7 @@ class ProcessEpochs(mne.Epochs):
 
 		# loop over EOG channels
 		eog_id = [self.info['ch_names'].index(ch) for ch in ch_name]
-		eog = np.vstack([np.hstack([self[epoch].get_data()[0,id,:] for epoch in range(len(self))]) for id in eog_id])
+		eog = np.vstack([np.hstack([self[epoch].get_data()[0,ind,:] for epoch in range(len(self))]) for ind in eog_id])
 		len_epoch = eog.shape[1]/len(self)
 		eog_base = np.array(np.hstack([np.matrix(eog[:,i*len_epoch:i*len_epoch + len_epoch]) - np.matrix(eog[:,i*len_epoch:i*len_epoch + len_epoch]).mean(axis=1) \
 				for i in range(len(self))]))
@@ -513,13 +560,15 @@ class ProcessEpochs(mne.Epochs):
 			eog_events, _ = peak_finder(filt_eog, extrema = -1)
 
 		# plot blinks
-		blinks = np.array([eog[id_max,id-self.info['sfreq']/2.0:id+self.info['sfreq']/2.0] for id in eog_events])
+		blinks = np.array([eog[id_max,ind-self.info['sfreq']/2.0:id+self.info['sfreq']/2.0] for ind in eog_events])
 
 
 		plt.plot(blinks.T)
 		plt.axvline(x = self.info['sfreq']/2.0, color = 'r')
-		plt.ylabel(ch_name[id_max])
-		plt.ylabel('Time (ms)')
+		plt.ylabel(ch_name[id_max] + ' (V)')
+		plt.xlabel('Time (ms)')
+		plt.title('Nr of blinks: ' + str(len(eog_events)))
+		# change x ticks to time here and set xlim
 		plt.savefig(os.path.join('/Users','Dirk','Dropbox','Experiment_data','data','load_accessory','processed_eeg', \
 		'subject_' + str(self.subject_id), 'session_' + str(self.session_id), 'figs','ica','detected_blinks.pdf'))
 		plt.close()
